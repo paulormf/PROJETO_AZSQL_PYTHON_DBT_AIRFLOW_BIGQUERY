@@ -49,6 +49,26 @@ python -m examples.export_order_items_to_gcs
 
 Cada execução usa um `run_id` novo. Se falhar durante uma tabela, arquivos já enviados permanecem na pasta daquela execução; não trate uma execução parcial como concluída.
 
+## Carregar os Parquet no BigQuery
+
+O script `examples/load_gcs_parquet_to_bigquery.py` submete load jobs nativos do BigQuery. Ele carrega apenas o `run_id` informado, cria uma tabela nativa por tabela habilitada e usa `WRITE_TRUNCATE`, apropriado para o modo `full` atual. O BigQuery lê o schema diretamente dos arquivos Parquet.
+
+O dataset precisa existir antes da carga. Crie-o uma vez na mesma localização do bucket:
+
+```powershell
+bq --location=us-central1 mk --dataset botbrewpub-ghsurp:raw
+```
+
+O ID do projeto, o dataset e a localização também podem ser configurados em `GCP_PROJECT_ID`, `BQ_DATASET` e `BQ_LOCATION` no `.env`. A identidade local precisa de permissão para criar load jobs e atualizar tabelas no dataset, além de ler/listar os objetos no bucket.
+
+Execute a extração e aguarde a mensagem de conclusão para todas as tabelas. Copie o `run_id` impresso e carregue exatamente essa execução:
+
+```powershell
+python -m examples.load_gcs_parquet_to_bigquery --run-id 20261009T172516Z-aeb16ae6
+```
+
+O exemplo usa `WRITE_TRUNCATE`; cada tabela será substituída pelo snapshot completo daquela execução. Não use um wildcard que cubra todos os `run_id`, pois isso poderia carregar snapshots repetidos. O código valida a localização do bucket e do dataset antes de iniciar os jobs.
+
 ### Exemplo de uso
 
 Execute o exemplo a partir da raiz do repositório:

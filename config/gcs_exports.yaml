@@ -4,6 +4,7 @@ exports:
     enabled: true
     schema: dbo
     table: order_items
+    load_mode: full
     # Prefer an explicit list of required columns. Use "*" only while exploring.
     columns: "*"
     chunk_rows: 5000
@@ -12,6 +13,55 @@ exports:
     enabled: true
     schema: dbo
     table: orders
+    load_mode: full
+    columns: "*"
+    chunk_rows: 5000
+
+  - name: products
+    enabled: true
+    schema: dbo
+    table: products
+    load_mode: full
+    columns: "*"
+    chunk_rows: 5000
+
+  - name: customers
+    enabled: true
+    schema: dbo
+    table: customers
+    load_mode: full
+    columns: "*"
+    chunk_rows: 5000
+
+  - name: categories
+    enabled: true
+    schema: dbo
+    table: categories
+    load_mode: full
+    columns: "*"
+    chunk_rows: 5000
+
+  - name: customer_addresses
+    enabled: true
+    schema: dbo
+    table: customer_addresses
+    load_mode: full
+    columns: "*"
+    chunk_rows: 5000
+
+  - name: customer_contacts
+    enabled: true
+    schema: dbo
+    table: customer_contacts
+    load_mode: full
+    columns: "*"
+    chunk_rows: 5000
+  
+  - name: employees
+    enabled: true
+    schema: dbo
+    table: employees
+    load_mode: full
     columns: "*"
     chunk_rows: 5000
 
@@ -20,6 +70,7 @@ exports:
   #   enabled: false
   #   schema: dbo
   #   table: another_table
+  #   load_mode: full
   #   columns:
   #     - id
   #     - created_at
