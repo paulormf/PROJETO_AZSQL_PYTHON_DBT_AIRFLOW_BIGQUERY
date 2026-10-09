@@ -5,7 +5,8 @@ exports:
     schema: dbo
     table: order_items
     load_mode: full
-    # Prefer an explicit list of required columns. Use "*" only while exploring.
+    # This portfolio currently exports all source columns. Revisit data minimization
+    # before using the same pattern with personal or production data.
     columns: "*"
     chunk_rows: 5000
 

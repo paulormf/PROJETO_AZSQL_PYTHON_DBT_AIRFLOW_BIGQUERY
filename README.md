@@ -28,7 +28,11 @@ credenciais em scripts, notebooks ou commits.
 
 ## Exportar Azure SQL para GCS como Parquet
 
-O script `examples/export_order_items_to_gcs.py` processa as tabelas habilitadas em `config/gcs_exports.yaml`. Essa configuração fica separada do código e do `.env`: você pode habilitar ou desabilitar tabelas sem alterar a lógica de extração.
+Neste projeto, `columns: "*"` no YAML leva todas as colunas da origem. O script compara `COUNT_BIG(*)` na origem com as linhas exportadas. Só publica `_SUCCESS.json` após todos os Parquet serem enviados e as contagens coincidirem; divergência gera `_FAILED.json`. O manifesto lista cada objeto, suas linhas e seu tamanho. Uma falha antes da publicação do marcador significa que a execução está incompleta.
+
+Essa é uma reconciliação operacional de contagens, não uma validação campo a campo. A fonte pode mudar durante a leitura; portanto, igualdade de contagens não garante um snapshot transacional consistente. Para esta carga de treinamento, execute enquanto a origem estiver estável. Em produção, defina a estratégia de snapshot compatível com a origem.
+
+O pipeline `pipelines/azure_sql_to_gcs.py` processa as tabelas habilitadas em `config/gcs_exports.yaml`. Essa configuração fica separada do código e do `.env`: você pode habilitar ou desabilitar tabelas sem alterar a lógica de extração.
 
 Instale as dependências e configure a autenticação local do Google Cloud:
 
@@ -44,14 +48,16 @@ Configure `GCS_BUCKET` no `.env` com o nome do bucket existente e use `GCS_PREFI
 Execute da raiz do projeto:
 
 ```powershell
-python -m examples.export_order_items_to_gcs
+python -m pipelines.azure_sql_to_gcs
 ```
 
 Cada execução usa um `run_id` novo. Se falhar durante uma tabela, arquivos já enviados permanecem na pasta daquela execução; não trate uma execução parcial como concluída.
 
 ## Carregar os Parquet no BigQuery
 
-O script `examples/load_gcs_parquet_to_bigquery.py` submete load jobs nativos do BigQuery. Ele carrega apenas o `run_id` informado, cria uma tabela nativa por tabela habilitada e usa `WRITE_TRUNCATE`, apropriado para o modo `full` atual. O BigQuery lê o schema diretamente dos arquivos Parquet.
+O carregador exige o `_SUCCESS.json` e verifica se os objetos Parquet correspondem ao manifesto. Após o load job, compara `output_rows` com a contagem exportada e publica `_BIGQUERY_SUCCESS.json` somente se as contagens forem iguais. Sem esse marcador ou havendo divergência, não considere a tabela pronta.
+
+O pipeline `pipelines/gcs_parquet_to_bigquery.py` submete load jobs nativos do BigQuery. Ele carrega apenas o `run_id` informado, cria uma tabela nativa por tabela habilitada e usa `WRITE_TRUNCATE`, apropriado para o modo `full` atual. O BigQuery lê o schema diretamente dos arquivos Parquet.
 
 O dataset precisa existir antes da carga. Crie-o uma vez na mesma localização do bucket:
 
@@ -64,20 +70,20 @@ O ID do projeto, o dataset e a localização também podem ser configurados em `
 Execute a extração e aguarde a mensagem de conclusão para todas as tabelas. Copie o `run_id` impresso e carregue exatamente essa execução:
 
 ```powershell
-python -m examples.load_gcs_parquet_to_bigquery --run-id 20261009T172516Z-aeb16ae6
+python -m pipelines.gcs_parquet_to_bigquery --run-id 20261009T172516Z-aeb16ae6
 ```
 
 O exemplo usa `WRITE_TRUNCATE`; cada tabela será substituída pelo snapshot completo daquela execução. Não use um wildcard que cubra todos os `run_id`, pois isso poderia carregar snapshots repetidos. O código valida a localização do bucket e do dataset antes de iniciar os jobs.
 
-### Exemplo de uso
+### Verificar a conexão com Azure SQL
 
 Execute o exemplo a partir da raiz do repositório:
 
 ```powershell
-python -m examples.azure_sql_connection_example
+python -m scripts.check_azure_sql_connection
 ```
 
-O exemplo abre uma conexão, executa `SELECT 1` e fecha os recursos. Para usar a
+O script abre uma conexão, executa `SELECT 1` sem ler dados das tabelas e fecha os recursos. Para usar a
 mesma conexão em outro módulo:
 
 ```python

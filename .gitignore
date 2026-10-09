@@ -10,3 +10,6 @@ __pycache__/
 *.log
 .idea/
 .vscode/
+!.vscode/
+.vscode/*
+!.vscode/settings.json

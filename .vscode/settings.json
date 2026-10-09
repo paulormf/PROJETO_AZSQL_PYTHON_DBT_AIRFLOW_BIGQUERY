@@ -1,0 +1,7 @@
+{
+  "github.copilot.chat.commitMessageGeneration.instructions": [
+    {
+      "text": "Escreva todas as mensagens de commit em português do Brasil. Siga Conventional Commits: mantenha o tipo convencional (feat, fix, docs, refactor, test, chore) e escreva a descrição em português, curta, no imperativo e sem ponto final. Se incluir corpo, escreva-o também em português."
+    }
+  ]
+}

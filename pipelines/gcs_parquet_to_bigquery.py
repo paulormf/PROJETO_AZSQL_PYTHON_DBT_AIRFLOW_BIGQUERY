@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -33,7 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--run-id",
         required=True,
-        help="Run ID printed by export_order_items_to_gcs.py, e.g. 20261009T172516Z-aeb16ae6",
+        help="Run ID printed by pipelines.azure_sql_to_gcs, e.g. 20261009T172516Z-aeb16ae6",
     )
     return parser.parse_args()
 
@@ -94,15 +95,55 @@ def main() -> None:
                 f"{base_prefix}/{export['name']}/extract_date={extract_date}"
                 f"/run_id={args.run_id}"
             )
-            parquet_objects = [
-                blob.name
-                for blob in storage_client.list_blobs(bucket_name, prefix=f"{object_prefix}/")
+            prefix = f"{object_prefix}/"
+            success_blob = bucket.blob(f"{prefix}_SUCCESS.json")
+            if not success_blob.exists():
+                raise FileNotFoundError(
+                    f"Manifesto _SUCCESS.json ausente para {export['name']}. "
+                    f"A extração pode estar incompleta: gs://{bucket_name}/{prefix}"
+                )
+            manifest = json.loads(success_blob.download_as_text())
+            if (
+                manifest.get("status") != "SUCCEEDED"
+                or manifest.get("run_id") != args.run_id
+                or manifest.get("table_name") != export["name"]
+                or manifest.get("load_mode") != export["load_mode"]
+                or manifest.get("source_count") != manifest.get("exported_count")
+                or manifest.get("reconciliation", {}).get("status") != "MATCHED"
+            ):
+                raise ValueError(f"Manifesto inválido ou incompatível para {export['name']}")
+
+            parquet_blobs = [
+                blob
+                for blob in storage_client.list_blobs(bucket_name, prefix=prefix)
                 if blob.name.endswith(".parquet")
             ]
+            parquet_objects = [blob.name for blob in parquet_blobs]
+            manifest_files = manifest.get("files")
+            if not isinstance(manifest_files, list):
+                raise ValueError(f"Manifesto sem lista de arquivos válida para {export['name']}")
+            expected_objects = {item.get("name") for item in manifest_files if isinstance(item, dict)}
+            if (
+                len(expected_objects) != len(manifest_files)
+                or set(parquet_objects) != expected_objects
+                or sum(int(item.get("rows", -1)) for item in manifest_files) != int(manifest.get("exported_count", -2))
+                or len(manifest_files) != int(manifest.get("file_count", -1))
+                or any(
+                    blob.size != next(
+                        (int(item["size_bytes"]) for item in manifest_files if item.get("name") == blob.name),
+                        -1,
+                    )
+                    for blob in parquet_blobs
+                )
+            ):
+                raise ValueError(
+                    f"Arquivos Parquet divergentes do manifesto para {export['name']}; "
+                    "não será carregada uma extração parcial ou alterada."
+                )
             if not parquet_objects:
                 raise FileNotFoundError(
-                    f"No Parquet objects found for {export['name']} at "
-                    f"gs://{bucket_name}/{object_prefix}/"
+                    f"A tabela {export['name']} não gerou Parquet. Para tabela vazia, "
+                    "será necessário definir o schema no BigQuery explicitamente."
                 )
 
             source_uri = f"gs://{bucket_name}/{object_prefix}/*.parquet"
@@ -120,6 +161,35 @@ def main() -> None:
                 location=dataset.location,
             )
             load_job.result()
+
+            loaded_rows = int(load_job.output_rows or 0)
+            expected_rows = int(manifest["exported_count"])
+            if loaded_rows != expected_rows:
+                raise RuntimeError(
+                    f"Reconciliação BigQuery falhou para {destination_table}: "
+                    f"manifesto={expected_rows}, BigQuery={loaded_rows}. Job: {load_job.job_id}"
+                )
+
+            bq_success = {
+                "manifest_version": 1,
+                "status": "SUCCEEDED",
+                "run_id": args.run_id,
+                "table_name": export["name"],
+                "destination_table": destination_table,
+                "bigquery_job_id": load_job.job_id,
+                "loaded_rows": loaded_rows,
+                "file_count": len(parquet_objects),
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "reconciliation": {
+                    "status": "MATCHED",
+                    "manifest_rows": expected_rows,
+                    "bigquery_rows": loaded_rows,
+                },
+            }
+            bucket.blob(f"{prefix}_BIGQUERY_SUCCESS.json").upload_from_string(
+                json.dumps(bq_success, ensure_ascii=False, indent=2),
+                content_type="application/json",
+            )
 
             print(
                 f"Carga full concluída: {destination_table}, "

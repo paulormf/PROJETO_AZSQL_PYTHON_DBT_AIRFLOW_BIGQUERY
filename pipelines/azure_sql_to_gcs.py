@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import uuid
@@ -15,7 +16,7 @@ from google.cloud import storage
 from sqlalchemy import Engine, text
 
 from src.azure_sql import get_engine
-from src.export_config import build_select_query, load_enabled_exports
+from src.export_config import build_count_query, build_select_query, load_enabled_exports
 
 
 def required_setting(name: str) -> str:
@@ -31,12 +32,15 @@ def export_table(
     export: dict[str, Any],
     object_prefix: str,
     chunk_rows: int,
-) -> tuple[int, int]:
+) -> tuple[int, int, int, list[dict[str, Any]]]:
     query = build_select_query(export)
+    count_query = build_count_query(export)
     total_rows = 0
     part_number = 0
+    files: list[dict[str, Any]] = []
 
     with engine.connect() as connection:
+        source_count = int(connection.execute(text(count_query)).scalar_one())
         chunks = pd.read_sql_query(text(query), connection, chunksize=chunk_rows)
 
         for dataframe in chunks:
@@ -54,7 +58,8 @@ def export_table(
                     compression="snappy",
                     index=False,
                 )
-                bucket.blob(object_name).upload_from_filename(
+                blob = bucket.blob(object_name)
+                blob.upload_from_filename(
                     str(parquet_path),
                     content_type="application/vnd.apache.parquet",
                     if_generation_match=0,
@@ -64,13 +69,26 @@ def export_table(
 
             chunk_count = len(dataframe)
             total_rows += chunk_count
+            blob.reload()
+            files.append(
+                {"name": object_name, "rows": chunk_count, "size_bytes": blob.size}
+            )
             print(
                 f"{export['name']}: enviado gs://{bucket.name}/{object_name} "
                 f"({chunk_count} linhas)"
             )
             del dataframe
 
-    return total_rows, part_number
+    return source_count, total_rows, part_number, files
+
+
+def write_json_marker(bucket: storage.Bucket, object_name: str, payload: dict[str, Any]) -> None:
+    """Create an immutable JSON marker in GCS."""
+    bucket.blob(object_name).upload_from_string(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        content_type="application/json",
+        if_generation_match=0,
+    )
 
 
 def main() -> None:
@@ -104,9 +122,36 @@ def main() -> None:
                 f"{base_prefix}/{export['name']}/extract_date={run_time:%Y-%m-%d}"
                 f"/run_id={run_id}"
             )
-            total_rows, part_number = export_table(
+            source_count, total_rows, part_number, files = export_table(
                 engine, bucket, export, object_prefix, chunk_rows
             )
+            manifest = {
+                "manifest_version": 1,
+                "status": "SUCCEEDED" if source_count == total_rows else "FAILED",
+                "run_id": run_id,
+                "table_name": export["name"],
+                "source": {"schema": export["schema"], "table": export["table"]},
+                "load_mode": export["load_mode"],
+                "started_at": run_time.isoformat(),
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "source_count": source_count,
+                "exported_count": total_rows,
+                "file_count": len(files),
+                "files": files,
+                "reconciliation": {
+                    "status": "MATCHED" if source_count == total_rows else "MISMATCH",
+                    "source_count": source_count,
+                    "exported_count": total_rows,
+                },
+            }
+            marker_file = "_SUCCESS.json" if source_count == total_rows else "_FAILED.json"
+            marker_name = f"{object_prefix}/{marker_file}"
+            write_json_marker(bucket, marker_name, manifest)
+            if source_count != total_rows:
+                raise RuntimeError(
+                    f"Reconciliação falhou para {export['name']}: Azure SQL={source_count}, "
+                    f"Parquet={total_rows}. Consulte gs://{bucket_name}/{marker_name}"
+                )
             print(
                 f"Exportação concluída para {export['name']}: {total_rows} linhas, "
                 f"{part_number} arquivos em gs://{bucket_name}/{object_prefix}/"

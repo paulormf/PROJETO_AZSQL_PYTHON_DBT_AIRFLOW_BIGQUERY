@@ -36,6 +36,12 @@ def build_select_query(export: dict[str, Any]) -> str:
     return f"SELECT {selected_columns} FROM {schema}.{table}"
 
 
+def build_count_query(export: dict[str, Any]) -> str:
+    schema = quote_identifier(export["schema"])
+    table = quote_identifier(export["table"])
+    return f"SELECT COUNT_BIG(*) FROM {schema}.{table}"
+
+
 def load_enabled_exports(config_path: Path) -> list[dict[str, Any]]:
     with config_path.open(encoding="utf-8") as config_file:
         config = yaml.safe_load(config_file) or {}
