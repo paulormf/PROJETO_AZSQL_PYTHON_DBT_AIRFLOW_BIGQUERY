@@ -1,0 +1,26 @@
+# Control the export allowlist here. Disabled tables are skipped.
+exports:
+  - name: order_items
+    enabled: true
+    schema: dbo
+    table: order_items
+    # Prefer an explicit list of required columns. Use "*" only while exploring.
+    columns: "*"
+    chunk_rows: 5000
+
+  - name: orders
+    enabled: true
+    schema: dbo
+    table: order
+    columns: "*"
+    chunk_rows: 5000
+
+  # Copy this entry for another table and set enabled: true when ready.
+  # - name: another_table
+  #   enabled: false
+  #   schema: dbo
+  #   table: another_table
+  #   columns:
+  #     - id
+  #     - created_at
+  #   chunk_rows: 25000

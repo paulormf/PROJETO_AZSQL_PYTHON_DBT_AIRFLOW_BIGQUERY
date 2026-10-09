@@ -28,11 +28,7 @@ credenciais em scripts, notebooks ou commits.
 
 ## Exportar Azure SQL para GCS como Parquet
 
-O exemplo `examples/export_order_items_to_gcs.py` lê a tabela em lotes, grava
-um arquivo Parquet por lote e envia cada arquivo ao Cloud Storage. A memória
-fica limitada ao lote atual e o arquivo temporário é removido após o upload.
-Cada execução grava em um prefixo novo com data e identificador da execução,
-sem sobrescrever arquivos de execuções anteriores.
+O script `examples/export_order_items_to_gcs.py` processa as tabelas habilitadas em `config/gcs_exports.yaml`. Essa configuração fica separada do código e do `.env`: você pode habilitar ou desabilitar tabelas sem alterar a lógica de extração.
 
 Instale as dependências e configure a autenticação local do Google Cloud:
 
@@ -41,15 +37,9 @@ python -m pip install -r requirements.txt
 gcloud auth application-default login
 ```
 
-O usuário autenticado precisa ter permissão para criar objetos no bucket, como
-`Storage Object User` concedida no bucket. A biblioteca usa Application Default
-Credentials; não salve chave JSON do Google em `.env` nem no repositório.
+A identidade autenticada precisa ter permissão para criar objetos no bucket. O cliente usa Application Default Credentials; não armazene uma chave JSON do Google no `.env` ou no repositório.
 
-Adicione ao `.env` as variáveis de exportação do `.env.example` e substitua
-`GCS_BUCKET` pelo nome do bucket existente. `AZURE_SQL_COLUMNS=*` é conveniente
-para a primeira exploração; para uma extração governada, informe apenas as
-colunas necessárias, por exemplo `AZURE_SQL_COLUMNS=order_id,product_id,quantity`.
-Confirme também o schema real de `order_items`.
+Configure `GCS_BUCKET` no `.env` com o nome do bucket existente. Para cada tabela, edite o YAML e use `enabled: true` para incluir ou `enabled: false` para ignorar. Prefira listar somente as colunas necessárias em `columns`; `"*"` deve ser usado apenas durante exploração. `chunk_rows` pode ser configurado por tabela. O valor padrão vem de `EXPORT_CHUNK_ROWS` no `.env`.
 
 Execute da raiz do projeto:
 
@@ -57,10 +47,7 @@ Execute da raiz do projeto:
 python -m examples.export_order_items_to_gcs
 ```
 
-`EXPORT_CHUNK_ROWS` controla quantas linhas são processadas de cada vez. O valor
-inicial é 50.000; ajuste com base no tamanho das linhas e na memória disponível.
-Se houver falha durante uma execução, os arquivos já enviados ficam sob o
-`run_id` daquela execução. Não trate uma pasta parcial como carga completa.
+Cada execução usa um `run_id` novo. Se falhar durante uma tabela, arquivos já enviados permanecem na pasta daquela execução; não trate uma execução parcial como concluída.
 
 ### Exemplo de uso
 
