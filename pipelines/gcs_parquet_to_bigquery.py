@@ -1,4 +1,4 @@
-"""Load one completed GCS extraction run into native BigQuery tables."""
+"""Validate a completed GCS snapshot in BigQuery staging, then promote to bronze."""
 
 from __future__ import annotations
 
@@ -6,11 +6,12 @@ import argparse
 import json
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
-from google.api_core.exceptions import NotFound
+from google.api_core.exceptions import GoogleAPICallError, NotFound, PreconditionFailed
 from google.cloud import bigquery, storage
 
 from src.export_config import load_enabled_exports
@@ -27,21 +28,101 @@ def required_setting(name: str) -> str:
     return value
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Load Parquet files from one GCS run into BigQuery."
+def write_json_marker(bucket: storage.Bucket, object_name: str, payload: dict[str, Any]) -> None:
+    bucket.blob(object_name).upload_from_string(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        content_type="application/json",
     )
-    parser.add_argument(
-        "--run-id",
-        required=True,
-        help="Run ID printed by pipelines.azure_sql_to_gcs, e.g. 20261009T172516Z-aeb16ae6",
-    )
-    return parser.parse_args()
+
+
+def set_staging_expiration(
+    client: bigquery.Client, table_id: str, ttl_days: int
+) -> bool:
+    """Set TTL using a fresh table etag; expiration is cleanup, not load success."""
+    expires = datetime.now(timezone.utc) + timedelta(days=ttl_days)
+    for attempt in range(3):
+        table = client.get_table(table_id)
+        table.expires = expires
+        try:
+            client.update_table(table, ["expires"])
+            return True
+        except PreconditionFailed:
+            if attempt == 2:
+                print(
+                    f"Aviso: não foi possível configurar a expiração de {table_id} "
+                    "após três tentativas; a promoção foi concluída, mas a tabela "
+                    "de staging precisará de limpeza manual."
+                )
+        except GoogleAPICallError:
+            print(
+                f"Aviso: não foi possível configurar a expiração de {table_id}; "
+                "a promoção foi concluída, mas a tabela de staging precisará de limpeza manual."
+            )
+            return False
+    return False
+
+
+def load_manifest(blob: storage.Blob, expected_run_id: str, expected_table: str) -> dict[str, Any]:
+    if not blob.exists():
+        raise FileNotFoundError(f"Manifesto ausente: gs://{blob.bucket.name}/{blob.name}")
+    manifest = json.loads(blob.download_as_text())
+    if (
+        manifest.get("status") != "SUCCEEDED"
+        or manifest.get("run_id") != expected_run_id
+        or manifest.get("table_name") != expected_table
+        or manifest.get("load_mode") != "full"
+        or manifest.get("source_count") != manifest.get("exported_count")
+        or manifest.get("reconciliation", {}).get("status") != "MATCHED"
+    ):
+        raise ValueError(f"Manifesto inválido ou incompatível: gs://{blob.bucket.name}/{blob.name}")
+    return manifest
+
+
+def verify_parquet_objects(
+    storage_client: storage.Client,
+    bucket_name: str,
+    prefix: str,
+    manifest: dict[str, Any],
+) -> list[str]:
+    blobs = [
+        blob
+        for blob in storage_client.list_blobs(bucket_name, prefix=prefix)
+        if blob.name.endswith(".parquet")
+    ]
+    manifest_files = manifest.get("files")
+    if not isinstance(manifest_files, list):
+        raise ValueError("Manifesto não contém uma lista de arquivos válida")
+    expected_files = {
+        item.get("name"): item
+        for item in manifest_files
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    }
+    if (
+        len(expected_files) != len(manifest_files)
+        or {blob.name for blob in blobs} != set(expected_files)
+        or len(manifest_files) != int(manifest.get("file_count", -1))
+        or sum(int(item.get("rows", -1)) for item in manifest_files)
+        != int(manifest.get("exported_count", -2))
+        or any(
+            blob.size != int(expected_files[blob.name].get("size_bytes", -1))
+            for blob in blobs
+        )
+    ):
+        raise ValueError("Objetos Parquet não correspondem ao manifesto da extração")
+    if not blobs:
+        raise ValueError(
+            "A tabela não gerou arquivos Parquet. Tabelas vazias exigem tratamento de schema explícito."
+        )
+    return [blob.name for blob in blobs]
 
 
 def main() -> None:
     load_dotenv()
-    args = parse_args()
+    parser = argparse.ArgumentParser(
+        description="Load a GCS snapshot to BigQuery staging, validate it, and promote to bronze."
+    )
+    parser.add_argument("--run-id", required=True, help="Run ID printed by the extraction pipeline")
+    args = parser.parse_args()
     if not RUN_ID_PATTERN.fullmatch(args.run_id):
         raise ValueError("Invalid run ID format")
 
@@ -52,40 +133,67 @@ def main() -> None:
         return
 
     project_id = required_setting("GCP_PROJECT_ID")
-    dataset_name = os.getenv("BQ_DATASET", "raw")
+    staging_dataset_name = required_setting("BQ_STAGING_DATASET")
+    bronze_dataset_name = required_setting("BQ_BRONZE_DATASET")
     expected_location = os.getenv("BQ_LOCATION", "us-central1")
     bucket_name = required_setting("GCS_BUCKET")
     base_prefix = os.getenv("GCS_PREFIX", "raw").strip("/")
-    extract_date = datetime.strptime(args.run_id[:8], "%Y%m%d").strftime("%Y-%m-%d")
+    staging_ttl_days = int(os.getenv("BQ_STAGING_TABLE_TTL_DAYS", "7"))
+    if staging_ttl_days <= 0:
+        raise ValueError("BQ_STAGING_TABLE_TTL_DAYS must be greater than zero")
 
-    if not BIGQUERY_IDENTIFIER_PATTERN.fullmatch(dataset_name):
-        raise ValueError("BQ_DATASET must be a valid BigQuery dataset ID")
+    for dataset_name in (staging_dataset_name, bronze_dataset_name):
+        if not BIGQUERY_IDENTIFIER_PATTERN.fullmatch(dataset_name):
+            raise ValueError(f"Invalid BigQuery dataset ID: {dataset_name!r}")
+    if staging_dataset_name == bronze_dataset_name:
+        raise ValueError("BQ_STAGING_DATASET and BQ_BRONZE_DATASET must be different")
 
     bigquery_client = bigquery.Client(project=project_id, location=expected_location)
-    storage_client = None
+    storage_client = storage.Client(project=project_id)
     try:
-        storage_client = storage.Client(project=project_id)
-        dataset_id = f"{project_id}.{dataset_name}"
+        staging_dataset_id = f"{project_id}.{staging_dataset_name}"
+        bronze_dataset_id = f"{project_id}.{bronze_dataset_name}"
         try:
-            dataset = bigquery_client.get_dataset(dataset_id)
+            staging_dataset = bigquery_client.get_dataset(staging_dataset_id)
+            bronze_dataset = bigquery_client.get_dataset(bronze_dataset_id)
         except NotFound as error:
             raise ValueError(
-                f"Dataset {dataset_id} does not exist. Create it in {expected_location} first."
+                "Os datasets de staging e bronze precisam existir antes da carga. "
+                f"Esperados: {staging_dataset_id} e {bronze_dataset_id}."
             ) from error
 
-        if dataset.location.lower() != expected_location.lower():
-            raise ValueError(
-                f"Configured BQ_LOCATION={expected_location}, but dataset location is "
-                f"{dataset.location}"
-            )
+        for dataset in (staging_dataset, bronze_dataset):
+            if dataset.location.lower() != expected_location.lower():
+                raise ValueError(
+                    f"Dataset {dataset.dataset_id} está em {dataset.location}; "
+                    f"esperado {expected_location}."
+                )
 
         bucket = storage_client.get_bucket(bucket_name)
-        if bucket.location.lower() != dataset.location.lower():
+        if bucket.location.lower() != staging_dataset.location.lower():
             raise ValueError(
-                f"GCS bucket location ({bucket.location}) must match BigQuery dataset "
-                f"location ({dataset.location}) for this load"
+                f"GCS bucket location ({bucket.location}) must match BigQuery location "
+                f"({staging_dataset.location})"
             )
 
+        run_manifest_path = f"{base_prefix}/_runs/run_id={args.run_id}/_RUN_SUCCESS.json"
+        run_manifest_blob = bucket.blob(run_manifest_path)
+        if not run_manifest_blob.exists():
+            raise FileNotFoundError(
+                f"Manifesto do run ausente: gs://{bucket_name}/{run_manifest_path}"
+            )
+        run_manifest = json.loads(run_manifest_blob.download_as_text())
+        configured_names = {export["name"] for export in exports}
+        if (
+            run_manifest.get("status") != "SUCCEEDED"
+            or run_manifest.get("run_id") != args.run_id
+            or set(run_manifest.get("table_names", [])) != configured_names
+            or run_manifest.get("snapshot_isolation") != "SNAPSHOT"
+        ):
+            raise ValueError("Manifesto geral do run não corresponde à configuração habilitada")
+
+        extract_date = datetime.strptime(args.run_id[:8], "%Y%m%d").strftime("%Y-%m-%d")
+        run_table_results = []
         for export in exports:
             table_name = export["table"]
             if not BIGQUERY_IDENTIFIER_PATTERN.fullmatch(table_name):
@@ -96,109 +204,124 @@ def main() -> None:
                 f"/run_id={args.run_id}"
             )
             prefix = f"{object_prefix}/"
-            success_blob = bucket.blob(f"{prefix}_SUCCESS.json")
-            if not success_blob.exists():
-                raise FileNotFoundError(
-                    f"Manifesto _SUCCESS.json ausente para {export['name']}. "
-                    f"A extração pode estar incompleta: gs://{bucket_name}/{prefix}"
-                )
-            manifest = json.loads(success_blob.download_as_text())
-            if (
-                manifest.get("status") != "SUCCEEDED"
-                or manifest.get("run_id") != args.run_id
-                or manifest.get("table_name") != export["name"]
-                or manifest.get("load_mode") != export["load_mode"]
-                or manifest.get("source_count") != manifest.get("exported_count")
-                or manifest.get("reconciliation", {}).get("status") != "MATCHED"
-            ):
-                raise ValueError(f"Manifesto inválido ou incompatível para {export['name']}")
-
-            parquet_blobs = [
-                blob
-                for blob in storage_client.list_blobs(bucket_name, prefix=prefix)
-                if blob.name.endswith(".parquet")
-            ]
-            parquet_objects = [blob.name for blob in parquet_blobs]
-            manifest_files = manifest.get("files")
-            if not isinstance(manifest_files, list):
-                raise ValueError(f"Manifesto sem lista de arquivos válida para {export['name']}")
-            expected_objects = {item.get("name") for item in manifest_files if isinstance(item, dict)}
-            if (
-                len(expected_objects) != len(manifest_files)
-                or set(parquet_objects) != expected_objects
-                or sum(int(item.get("rows", -1)) for item in manifest_files) != int(manifest.get("exported_count", -2))
-                or len(manifest_files) != int(manifest.get("file_count", -1))
-                or any(
-                    blob.size != next(
-                        (int(item["size_bytes"]) for item in manifest_files if item.get("name") == blob.name),
-                        -1,
-                    )
-                    for blob in parquet_blobs
-                )
-            ):
-                raise ValueError(
-                    f"Arquivos Parquet divergentes do manifesto para {export['name']}; "
-                    "não será carregada uma extração parcial ou alterada."
-                )
-            if not parquet_objects:
-                raise FileNotFoundError(
-                    f"A tabela {export['name']} não gerou Parquet. Para tabela vazia, "
-                    "será necessário definir o schema no BigQuery explicitamente."
-                )
-
-            source_uri = f"gs://{bucket_name}/{object_prefix}/*.parquet"
-            destination_table = f"{project_id}.{dataset_name}.{table_name}"
-            job_config = bigquery.LoadJobConfig(
-                source_format=bigquery.SourceFormat.PARQUET,
-                create_disposition=bigquery.CreateDisposition.CREATE_IF_NEEDED,
-                write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
+            manifest = load_manifest(
+                bucket.blob(f"{prefix}_SUCCESS.json"), args.run_id, export["name"]
             )
+            parquet_objects = verify_parquet_objects(
+                storage_client, bucket_name, prefix, manifest
+            )
+            source_uri = f"gs://{bucket_name}/{object_prefix}/*.parquet"
+            run_suffix = args.run_id.replace("-", "_")
+            staging_table_name = f"_stg_{table_name}_{run_suffix}"
+            staging_table_id = f"{staging_dataset_id}.{staging_table_name}"
+            bronze_table_id = f"{bronze_dataset_id}.{table_name}"
 
             load_job = bigquery_client.load_table_from_uri(
                 source_uri,
-                destination_table,
-                job_config=job_config,
-                location=dataset.location,
+                staging_table_id,
+                job_config=bigquery.LoadJobConfig(
+                    source_format=bigquery.SourceFormat.PARQUET,
+                    create_disposition=bigquery.CreateDisposition.CREATE_IF_NEEDED,
+                    write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
+                ),
+                location=staging_dataset.location,
             )
             load_job.result()
-
-            loaded_rows = int(load_job.output_rows or 0)
             expected_rows = int(manifest["exported_count"])
-            if loaded_rows != expected_rows:
+            staged_table = bigquery_client.get_table(staging_table_id)
+            if int(staged_table.num_rows) != expected_rows:
                 raise RuntimeError(
-                    f"Reconciliação BigQuery falhou para {destination_table}: "
-                    f"manifesto={expected_rows}, BigQuery={loaded_rows}. Job: {load_job.job_id}"
+                    f"Reconciliação do staging falhou para {staging_table_id}: "
+                    f"manifesto={expected_rows}, BigQuery={staged_table.num_rows}."
+                )
+            run_table_results.append(
+                {
+                    "export": export,
+                    "prefix": prefix,
+                    "manifest": manifest,
+                    "parquet_objects": parquet_objects,
+                    "staging_table_id": staging_table_id,
+                    "bronze_table_id": bronze_table_id,
+                    "load_job": load_job,
+                    "expected_rows": expected_rows,
+                }
+            )
+
+        # Do not touch any Bronze table until every source table is staged and validated.
+        promoted_tables = []
+        for result in run_table_results:
+            staging_table_id = result["staging_table_id"]
+            bronze_table_id = result["bronze_table_id"]
+            expected_rows = result["expected_rows"]
+            copy_job = bigquery_client.copy_table(
+                staging_table_id,
+                bronze_table_id,
+                job_config=bigquery.CopyJobConfig(
+                    write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE
+                ),
+                location=bronze_dataset.location,
+            )
+            copy_job.result()
+            bronze_table = bigquery_client.get_table(bronze_table_id)
+            if int(bronze_table.num_rows) != expected_rows:
+                raise RuntimeError(
+                    f"Reconciliação bronze falhou para {bronze_table_id}: "
+                    f"manifesto={expected_rows}, BigQuery={bronze_table.num_rows}."
                 )
 
-            bq_success = {
+            staged_table = bigquery_client.get_table(staging_table_id)
+            if int(staged_table.num_rows) != expected_rows:
+                raise RuntimeError(
+                    f"Reconciliação final do staging falhou para {staging_table_id}: "
+                    f"esperado={expected_rows}, atual={staged_table.num_rows}."
+                )
+            set_staging_expiration(
+                bigquery_client, staging_table_id, staging_ttl_days
+            )
+            table_success = {
                 "manifest_version": 1,
                 "status": "SUCCEEDED",
                 "run_id": args.run_id,
-                "table_name": export["name"],
-                "destination_table": destination_table,
-                "bigquery_job_id": load_job.job_id,
-                "loaded_rows": loaded_rows,
-                "file_count": len(parquet_objects),
+                "table_name": result["export"]["name"],
+                "destination_table": bronze_table_id,
+                "staging_table": staging_table_id,
+                "bigquery_load_job_id": result["load_job"].job_id,
+                "bigquery_copy_job_id": copy_job.job_id,
+                "loaded_rows": expected_rows,
+                "file_count": len(result["parquet_objects"]),
                 "completed_at": datetime.now(timezone.utc).isoformat(),
                 "reconciliation": {
                     "status": "MATCHED",
                     "manifest_rows": expected_rows,
-                    "bigquery_rows": loaded_rows,
+                    "staging_rows": int(staged_table.num_rows),
+                    "bronze_rows": int(bronze_table.num_rows),
                 },
             }
-            bucket.blob(f"{prefix}_BIGQUERY_SUCCESS.json").upload_from_string(
-                json.dumps(bq_success, ensure_ascii=False, indent=2),
-                content_type="application/json",
+            write_json_marker(
+                bucket, f"{result['prefix']}_BIGQUERY_SUCCESS.json", table_success
+            )
+            promoted_tables.append(table_success)
+            print(
+                f"Carga promovida para {bronze_table_id}: {expected_rows} linhas; "
+                f"staging {staging_table_id}."
             )
 
-            print(
-                f"Carga full concluída: {destination_table}, "
-                f"{load_job.output_rows} linhas de {len(parquet_objects)} arquivos."
-            )
+        write_json_marker(
+            bucket,
+            f"{base_prefix}/_runs/run_id={args.run_id}/_BIGQUERY_RUN_SUCCESS.json",
+            {
+                "manifest_version": 1,
+                "status": "SUCCEEDED",
+                "run_id": args.run_id,
+                "bronze_dataset": bronze_dataset_id,
+                "staging_dataset": staging_dataset_id,
+                "table_names": [result["table_name"] for result in promoted_tables],
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
     finally:
         bigquery_client.close()
-        if storage_client is not None:
-            storage_client.close()
+        storage_client.close()
 
 
 if __name__ == "__main__":

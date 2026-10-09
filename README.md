@@ -28,11 +28,11 @@ credenciais em scripts, notebooks ou commits.
 
 ## Exportar Azure SQL para GCS como Parquet
 
+O pipeline usa uma transação `SNAPSHOT` única para contar e extrair todas as tabelas habilitadas. Os manifestos por tabela e `_RUN_SUCCESS.json` só são publicados depois do commit. A transação longa pode reter versões de linhas e consumir recursos na origem; para bases muito grandes, prefira extrair de uma cópia transacional do banco ou use uma estratégia de bootstrap coordenada com CDC.
+
 Neste projeto, `columns: "*"` no YAML leva todas as colunas da origem. O script compara `COUNT_BIG(*)` na origem com as linhas exportadas. Só publica `_SUCCESS.json` após todos os Parquet serem enviados e as contagens coincidirem; divergência gera `_FAILED.json`. O manifesto lista cada objeto, suas linhas e seu tamanho. Uma falha antes da publicação do marcador significa que a execução está incompleta.
 
-Essa é uma reconciliação operacional de contagens, não uma validação campo a campo. A fonte pode mudar durante a leitura; portanto, igualdade de contagens não garante um snapshot transacional consistente. Para esta carga de treinamento, execute enquanto a origem estiver estável. Em produção, defina a estratégia de snapshot compatível com a origem.
-
-O pipeline `pipelines/azure_sql_to_gcs.py` processa as tabelas habilitadas em `config/gcs_exports.yaml`. Essa configuração fica separada do código e do `.env`: você pode habilitar ou desabilitar tabelas sem alterar a lógica de extração.
+O pipeline `pipelines/azure_sql_to_gcs.py` processa as tabelas habilitadas em `config/gcs_exports.yaml`. Essa configuração fica separada do código e do `.env`: você pode habilitar ou desabilitar tabelas sem alterar a lógica de extração. Neste projeto, `columns: "*"` leva todas as colunas; antes de usar dados pessoais ou produção, avalie minimização e classificação LGPD.
 
 Instale as dependências e configure a autenticação local do Google Cloud:
 
@@ -43,7 +43,7 @@ gcloud auth application-default login
 
 A identidade autenticada precisa ter permissão para criar objetos no bucket. O cliente usa Application Default Credentials; não armazene uma chave JSON do Google no `.env` ou no repositório.
 
-Configure `GCS_BUCKET` no `.env` com o nome do bucket existente e use `GCS_PREFIX=raw`. O script acrescenta o nome da tabela configurado no YAML, produzindo caminhos como `raw/order_items/extract_date=.../run_id=.../`. Para cada tabela, edite o YAML e use `enabled: true` para incluir ou `enabled: false` para ignorar. Prefira listar somente as colunas necessárias em `columns`; `"*"` deve ser usado apenas durante exploração. `chunk_rows` pode ser configurado por tabela. O valor padrão vem de `EXPORT_CHUNK_ROWS` no `.env`.
+Configure `GCS_BUCKET` no `.env` com o nome do bucket existente e use `GCS_PREFIX=raw`. O script acrescenta o nome da tabela configurado no YAML, produzindo caminhos como `raw/order_items/extract_date=.../run_id=.../`. Para cada tabela, edite o YAML e use `enabled: true` para incluir ou `enabled: false` para ignorar. `chunk_rows` pode ser configurado por tabela. O valor padrão vem de `EXPORT_CHUNK_ROWS` no `.env`.
 
 Execute da raiz do projeto:
 
@@ -51,21 +51,22 @@ Execute da raiz do projeto:
 python -m pipelines.azure_sql_to_gcs
 ```
 
-Cada execução usa um `run_id` novo. Se falhar durante uma tabela, arquivos já enviados permanecem na pasta daquela execução; não trate uma execução parcial como concluída.
+Cada execução usa um `run_id` novo, impresso ao final. Se falhar, os Parquet já enviados permanecem no GCS, mas sem `_RUN_SUCCESS.json` não devem ser carregados.
 
 ## Carregar os Parquet no BigQuery
 
-O carregador exige o `_SUCCESS.json` e verifica se os objetos Parquet correspondem ao manifesto. Após o load job, compara `output_rows` com a contagem exportada e publica `_BIGQUERY_SUCCESS.json` somente se as contagens forem iguais. Sem esse marcador ou havendo divergência, não considere a tabela pronta.
+O carregador exige `_RUN_SUCCESS.json` e `_SUCCESS.json` e confere os objetos Parquet registrados no manifesto. Carrega cada tabela em uma tabela separada por execução no dataset de staging, reconcilia as linhas e só então promove para o dataset Bronze. As tabelas temporárias expiram após `BQ_STAGING_TABLE_TTL_DAYS` (padrão: 7). `_BIGQUERY_RUN_SUCCESS.json` indica que todas as tabelas foram promovidas.
 
-O pipeline `pipelines/gcs_parquet_to_bigquery.py` submete load jobs nativos do BigQuery. Ele carrega apenas o `run_id` informado, cria uma tabela nativa por tabela habilitada e usa `WRITE_TRUNCATE`, apropriado para o modo `full` atual. O BigQuery lê o schema diretamente dos arquivos Parquet.
+O pipeline `pipelines/gcs_parquet_to_bigquery.py` usa load jobs nativos do BigQuery. O BigQuery lê o schema diretamente dos arquivos Parquet.
 
-O dataset precisa existir antes da carga. Crie-o uma vez na mesma localização do bucket:
+Os datasets de staging e Bronze precisam existir antes da carga e ficar na mesma localização do bucket. Configure `BQ_STAGING_DATASET`, `BQ_BRONZE_DATASET`, `BQ_LOCATION` e `BQ_STAGING_TABLE_TTL_DAYS` no `.env`. Crie os dois datasets uma vez (substitua `<project-id>` pelo valor de `GCP_PROJECT_ID`):
 
 ```powershell
-bq --location=us-central1 mk --dataset botbrewpub-ghsurp:raw
+bq --location=us-central1 mk --dataset <project-id>:PROJECT_1_STAGING
+bq --location=us-central1 mk --dataset <project-id>:PROJECT_1_BRONZE
 ```
 
-O ID do projeto, o dataset e a localização também podem ser configurados em `GCP_PROJECT_ID`, `BQ_DATASET` e `BQ_LOCATION` no `.env`. A identidade local precisa de permissão para criar load jobs e atualizar tabelas no dataset, além de ler/listar os objetos no bucket.
+O ID do projeto e os datasets são configuração de ambiente, sem credenciais versionadas. A identidade local precisa de permissão para criar load jobs, criar/atualizar tabelas nos dois datasets e ler/listar os objetos no bucket.
 
 Execute a extração e aguarde a mensagem de conclusão para todas as tabelas. Copie o `run_id` impresso e carregue exatamente essa execução:
 
@@ -73,7 +74,7 @@ Execute a extração e aguarde a mensagem de conclusão para todas as tabelas. C
 python -m pipelines.gcs_parquet_to_bigquery --run-id 20261009T172516Z-aeb16ae6
 ```
 
-O exemplo usa `WRITE_TRUNCATE`; cada tabela será substituída pelo snapshot completo daquela execução. Não use um wildcard que cubra todos os `run_id`, pois isso poderia carregar snapshots repetidos. O código valida a localização do bucket e do dataset antes de iniciar os jobs.
+O dataset Bronze recebe o snapshot full promovido. O dataset staging contém tabelas temporárias separadas por execução; não use um wildcard que cubra todos os `run_id`. O código valida a localização dos dois datasets e do bucket antes dos jobs.
 
 ### Verificar a conexão com Azure SQL
 
