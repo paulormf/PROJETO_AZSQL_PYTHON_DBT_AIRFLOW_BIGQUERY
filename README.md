@@ -39,7 +39,7 @@ gcloud auth application-default login
 
 A identidade autenticada precisa ter permissão para criar objetos no bucket. O cliente usa Application Default Credentials; não armazene uma chave JSON do Google no `.env` ou no repositório.
 
-Configure `GCS_BUCKET` no `.env` com o nome do bucket existente. Para cada tabela, edite o YAML e use `enabled: true` para incluir ou `enabled: false` para ignorar. Prefira listar somente as colunas necessárias em `columns`; `"*"` deve ser usado apenas durante exploração. `chunk_rows` pode ser configurado por tabela. O valor padrão vem de `EXPORT_CHUNK_ROWS` no `.env`.
+Configure `GCS_BUCKET` no `.env` com o nome do bucket existente e use `GCS_PREFIX=raw`. O script acrescenta o nome da tabela configurado no YAML, produzindo caminhos como `raw/order_items/extract_date=.../run_id=.../`. Para cada tabela, edite o YAML e use `enabled: true` para incluir ou `enabled: false` para ignorar. Prefira listar somente as colunas necessárias em `columns`; `"*"` deve ser usado apenas durante exploração. `chunk_rows` pode ser configurado por tabela. O valor padrão vem de `EXPORT_CHUNK_ROWS` no `.env`.
 
 Execute da raiz do projeto:
 

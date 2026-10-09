@@ -11,7 +11,7 @@ exports:
   - name: orders
     enabled: true
     schema: dbo
-    table: order
+    table: orders
     columns: "*"
     chunk_rows: 5000
 
