@@ -196,6 +196,7 @@ def export_changes(
         connection,
         params={"from_lsn": from_lsn, "to_lsn": to_lsn},
         chunksize=chunk_rows,
+        dtype_backend="pyarrow",
     )
     files: list[dict[str, Any]] = []
     total_rows = 0

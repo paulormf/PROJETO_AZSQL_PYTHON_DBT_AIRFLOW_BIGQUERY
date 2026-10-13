@@ -153,6 +153,22 @@ def quote_column(name: str) -> str:
     return f"`{name}`"
 
 
+def compare_schema_fields(
+    expected: dict[str, str], actual: dict[str, str]
+) -> tuple[list[str], list[str], list[tuple[str, str, str]]]:
+    """Return missing, unexpected, and type-mismatched fields, independent of order."""
+    expected_names = set(expected)
+    actual_names = set(actual)
+    missing = sorted(expected_names - actual_names)
+    unexpected = sorted(actual_names - expected_names)
+    type_mismatches = sorted(
+        (name, expected[name], actual[name])
+        for name in expected_names & actual_names
+        if expected[name] != actual[name]
+    )
+    return missing, unexpected, type_mismatches
+
+
 def validate_stage_data(
     client: bigquery.Client,
     staging_table_id: str,
@@ -197,6 +213,25 @@ def validate_stage_data(
     return source_columns
 
 
+def compare_bronze_and_stage_schemas(
+    client: bigquery.Client,
+    bronze_table_id: str,
+    staging_table_id: str,
+    location: str,
+) -> tuple[list[str], list[str], list[tuple[str, str, str]]]:
+    """Require the CDC batch schema to match the existing Bronze schema exactly."""
+    bronze_schema = {
+        field.name: field.field_type for field in client.get_table(bronze_table_id).schema
+    }
+    staging_schema = {
+        field.name: field.field_type
+        for field in client.get_table(staging_table_id).schema
+        if field.name not in CDC_METADATA_COLUMNS
+    }
+
+    return compare_schema_fields(bronze_schema, staging_schema)
+
+
 def ensure_history_table(
     client: bigquery.Client,
     history_table_id: str,
@@ -215,10 +250,17 @@ def ensure_history_table(
         history.clustering_fields = primary_key[:4]
         client.create_table(history)
         return
-    staged_schema = [(field.name, field.field_type) for field in staged.schema]
-    history_schema = [(field.name, field.field_type) for field in history.schema]
-    if staged_schema != history_schema:
-        raise ValueError(f"CDC history schema changed for {history_table_id}; migrate it explicitly")
+    staged_schema = {field.name: field.field_type for field in staged.schema}
+    history_schema = {field.name: field.field_type for field in history.schema}
+    missing_columns, unexpected_columns, type_mismatches = compare_schema_fields(
+        history_schema, staged_schema
+    )
+    if missing_columns or unexpected_columns or type_mismatches:
+        raise ValueError(
+            f"CDC history schema changed for {history_table_id}; "
+            f"missing_in_batch={missing_columns}, unexpected_in_batch={unexpected_columns}, "
+            f"type_mismatches={type_mismatches}. Migrate it explicitly."
+        )
 
 
 def build_apply_sql(
@@ -384,8 +426,11 @@ def main() -> None:
             for identifier in (table, export["name"]):
                 if not IDENTIFIER_PATTERN.fullmatch(identifier):
                     raise ValueError(f"Invalid table identifier: {identifier!r}")
+            extract_date = datetime.strptime(args.run_id[:8], "%Y%m%d").strftime(
+                "%Y-%m-%d"
+            )
             object_prefix = (
-                f"{base_prefix}/{export['name']}/cdc/extract_date={args.run_id[:8]}"
+                f"{base_prefix}/{export['name']}/cdc/extract_date={extract_date}"
                 f"/run_id={args.run_id}"
             )
             manifest = load_batch_manifest(bucket, object_prefix, args.run_id, export)
@@ -480,16 +525,18 @@ def main() -> None:
                     bq_client, staging_table_id, export, location
                 )
                 bronze_table_id = f"{bronze_dataset_id}.{table}"
-                bronze_table = bq_client.get_table(bronze_table_id)
-                bronze_schema = [(field.name, field.field_type) for field in bronze_table.schema]
-                source_schema = [
-                    (field.name, field.field_type)
-                    for field in bq_client.get_table(staging_table_id).schema
-                    if field.name not in CDC_METADATA_COLUMNS
-                ]
-                if bronze_schema != source_schema:
+                missing_columns, unexpected_columns, type_mismatches = (
+                    compare_bronze_and_stage_schemas(
+                        bq_client, bronze_table_id, staging_table_id, location
+                    )
+                )
+                if missing_columns or unexpected_columns or type_mismatches:
                     raise ValueError(
-                        f"Source schema changed for {bronze_table_id}; run a full refresh/schema migration first"
+                        f"Source schema changed for {bronze_table_id}; "
+                        f"missing_in_cdc={missing_columns}, "
+                        f"unexpected_in_cdc={unexpected_columns}, "
+                        f"type_mismatches={type_mismatches}. "
+                        "Run a full refresh/schema migration before applying this batch."
                     )
                 ensure_history_table(
                     bq_client,

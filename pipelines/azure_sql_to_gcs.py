@@ -40,7 +40,12 @@ def export_table(
     total_rows = 0
     files: list[dict[str, Any]] = []
     query = build_select_query(export)
-    chunks = pd.read_sql_query(query, connection, chunksize=chunk_rows)
+    chunks = pd.read_sql_query(
+        query,
+        connection,
+        chunksize=chunk_rows,
+        dtype_backend="pyarrow",
+    )
 
     for part_number, dataframe in enumerate(chunks, start=1):
         object_name = f"{object_prefix}/part-{part_number:05d}.parquet"
