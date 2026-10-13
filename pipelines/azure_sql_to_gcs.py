@@ -13,7 +13,7 @@ from typing import Any
 import pandas as pd
 from dotenv import load_dotenv
 from google.cloud import storage
-from sqlalchemy import Connection
+from sqlalchemy import Connection, Engine, text
 
 from src.azure_sql import get_engine
 from src.export_config import build_count_query, build_select_query, load_enabled_exports
@@ -89,6 +89,82 @@ def write_json_marker(
     )
 
 
+def lsn_hex(value: Any) -> str:
+    """Format SQL Server binary(10) LSN values consistently for manifests."""
+    if value is None:
+        raise RuntimeError("Azure SQL returned an empty CDC LSN")
+    if isinstance(value, memoryview):
+        value = value.tobytes()
+    if isinstance(value, bytearray):
+        value = bytes(value)
+    if not isinstance(value, bytes) or len(value) != 10:
+        raise RuntimeError(f"Unexpected CDC LSN value returned by Azure SQL: {value!r}")
+    return f"0x{value.hex().upper()}"
+
+
+def capture_cdc_baselines(
+    engine: Engine, exports: list[dict[str, Any]]
+) -> dict[str, dict[str, str]]:
+    """Read the CDC high watermark before starting the full SNAPSHOT transaction."""
+    cdc_exports = [item for item in exports if item.get("incremental_strategy") == "cdc"]
+    if not cdc_exports:
+        return {}
+
+    statement = text(
+        """
+        SELECT
+            ct.capture_instance,
+            ct.start_lsn AS capture_start_lsn,
+            sys.fn_cdc_get_min_lsn(ct.capture_instance) AS min_lsn
+        FROM cdc.change_tables AS ct
+        INNER JOIN sys.tables AS t ON t.object_id = ct.source_object_id
+        INNER JOIN sys.schemas AS s ON s.schema_id = t.schema_id
+        WHERE s.name = :schema_name AND t.name = :table_name
+        """
+    )
+    capture_metadata: dict[str, dict[str, Any]] = {}
+    with engine.connect() as connection:
+        for export in cdc_exports:
+            rows = connection.execute(
+                statement,
+                {"schema_name": export["schema"], "table_name": export["table"]},
+            ).mappings().all()
+            if len(rows) != 1:
+                raise RuntimeError(
+                    f"Expected exactly one CDC capture instance for "
+                    f"{export['schema']}.{export['table']}; found {len(rows)}"
+                )
+            row = rows[0]
+            start_lsn = lsn_hex(row["capture_start_lsn"])
+            min_lsn = lsn_hex(row["min_lsn"])
+            capture_metadata[export["name"]] = {
+                "capture_instance": row["capture_instance"],
+                "capture_start_lsn": start_lsn,
+                "min_lsn_at_baseline": min_lsn,
+            }
+
+        baseline_lsn = lsn_hex(
+            connection.execute(text("SELECT sys.fn_cdc_get_max_lsn()")).scalar_one()
+        )
+
+    baselines: dict[str, dict[str, str]] = {}
+    for export in cdc_exports:
+        metadata = capture_metadata[export["name"]]
+        baseline_bytes = bytes.fromhex(baseline_lsn[2:])
+        if baseline_bytes < bytes.fromhex(metadata["capture_start_lsn"][2:]):
+            raise RuntimeError(
+                f"CDC capture for {export['schema']}.{export['table']} has not "
+                "processed changes through its start LSN yet. Retry after CDC capture advances."
+            )
+        if baseline_bytes < bytes.fromhex(metadata["min_lsn_at_baseline"][2:]):
+            raise RuntimeError(
+                f"CDC baseline LSN is older than the retained minimum for "
+                f"{export['schema']}.{export['table']}; inspect CDC retention."
+            )
+        baselines[export["name"]] = {**metadata, "baseline_lsn": baseline_lsn}
+    return baselines
+
+
 def main() -> None:
     load_dotenv()
     config_path = Path(os.getenv("EXPORT_CONFIG_PATH", "config/gcs_exports.yaml"))
@@ -111,6 +187,10 @@ def main() -> None:
 
     try:
         bucket = storage_client.bucket(bucket_name)
+        # The watermark must precede the SNAPSHOT. Changes after this point can
+        # be replayed over the full baseline; taking it later could skip changes.
+        cdc_baselines = capture_cdc_baselines(engine, exports)
+        cdc_baseline_captured_at = datetime.now(timezone.utc).isoformat()
         # One transaction gives every table and its count the same database view.
         with engine.connect() as connection:
             connection = connection.execution_options(isolation_level="SNAPSHOT")
@@ -152,13 +232,20 @@ def main() -> None:
         for result in table_results:
             export = result["export"]
             manifest = {
-                "manifest_version": 1,
+                "manifest_version": 2,
                 "status": "SUCCEEDED",
                 "run_id": run_id,
                 "table_name": export["name"],
                 "source": {"schema": export["schema"], "table": export["table"]},
                 "load_mode": export["load_mode"],
+                "incremental_strategy": export.get("incremental_strategy", "full_refresh"),
                 "snapshot_isolation": "SNAPSHOT",
+                "cdc_baseline": cdc_baselines.get(export["name"]),
+                "cdc_baseline_captured_at": (
+                    cdc_baseline_captured_at
+                    if export["name"] in cdc_baselines
+                    else None
+                ),
                 "started_at": run_time.isoformat(),
                 "completed_at": datetime.now(timezone.utc).isoformat(),
                 "source_count": result["source_count"],
@@ -176,10 +263,14 @@ def main() -> None:
             )
 
         run_manifest = {
-            "manifest_version": 1,
+            "manifest_version": 2,
             "status": "SUCCEEDED",
             "run_id": run_id,
             "snapshot_isolation": "SNAPSHOT",
+            "cdc_baselines": cdc_baselines,
+            "cdc_baseline_captured_at": (
+                cdc_baseline_captured_at if cdc_baselines else None
+            ),
             "started_at": run_time.isoformat(),
             "completed_at": datetime.now(timezone.utc).isoformat(),
             "table_names": [result["export"]["name"] for result in table_results],

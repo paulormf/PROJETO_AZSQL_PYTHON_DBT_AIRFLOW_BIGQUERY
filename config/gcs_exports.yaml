@@ -5,6 +5,7 @@ exports:
     schema: dbo
     table: order_items
     load_mode: full
+    incremental_strategy: cdc
     # This portfolio currently exports all source columns. Revisit data minimization
     # before using the same pattern with personal or production data.
     columns: "*"
@@ -15,6 +16,7 @@ exports:
     schema: dbo
     table: orders
     load_mode: full
+    incremental_strategy: cdc
     columns: "*"
     chunk_rows: 5000
 
@@ -23,6 +25,7 @@ exports:
     schema: dbo
     table: products
     load_mode: full
+    incremental_strategy: cdc
     columns: "*"
     chunk_rows: 5000
 
@@ -31,6 +34,7 @@ exports:
     schema: dbo
     table: customers
     load_mode: full
+    incremental_strategy: full_refresh
     columns: "*"
     chunk_rows: 5000
 
@@ -39,6 +43,7 @@ exports:
     schema: dbo
     table: categories
     load_mode: full
+    incremental_strategy: full_refresh
     columns: "*"
     chunk_rows: 5000
 
@@ -47,6 +52,7 @@ exports:
     schema: dbo
     table: customer_addresses
     load_mode: full
+    incremental_strategy: full_refresh
     columns: "*"
     chunk_rows: 5000
 
@@ -55,6 +61,7 @@ exports:
     schema: dbo
     table: customer_contacts
     load_mode: full
+    incremental_strategy: full_refresh
     columns: "*"
     chunk_rows: 5000
   
@@ -63,6 +70,7 @@ exports:
     schema: dbo
     table: employees
     load_mode: full
+    incremental_strategy: full_refresh
     columns: "*"
     chunk_rows: 5000
 
@@ -72,6 +80,7 @@ exports:
   #   schema: dbo
   #   table: another_table
   #   load_mode: full
+  #   incremental_strategy: full_refresh
   #   columns:
   #     - id
   #     - created_at

@@ -69,6 +69,14 @@ def load_enabled_exports(config_path: Path) -> list[dict[str, Any]]:
                 f"{export['load_mode']!r}; only 'full' is implemented currently"
             )
 
+        strategy = export.get("incremental_strategy", "full_refresh")
+        if not isinstance(strategy, str) or strategy not in {"cdc", "full_refresh"}:
+            raise ValueError(
+                f"Export '{export.get('name')}' has unsupported incremental_strategy "
+                f"{strategy!r}; use 'cdc' or 'full_refresh'"
+            )
+        export["incremental_strategy"] = strategy
+
         name = export["name"]
         quote_identifier(name)
         if name in seen_names:

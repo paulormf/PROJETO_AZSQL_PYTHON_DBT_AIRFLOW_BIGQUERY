@@ -19,6 +19,7 @@ from src.export_config import load_enabled_exports
 
 RUN_ID_PATTERN = re.compile(r"^\d{8}T\d{6}Z-[0-9a-f]{8}$")
 BIGQUERY_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+LSN_PATTERN = re.compile(r"^0x[0-9A-F]{20}$")
 
 
 def required_setting(name: str) -> str:
@@ -62,12 +63,36 @@ def set_staging_expiration(
     return False
 
 
-def load_manifest(blob: storage.Blob, expected_run_id: str, expected_table: str) -> dict[str, Any]:
+def validate_cdc_baseline(value: Any, table_name: str) -> dict[str, str]:
+    if not isinstance(value, dict):
+        raise ValueError(f"Manifesto não contém baseline CDC para {table_name}")
+    for key in ("capture_start_lsn", "min_lsn_at_baseline", "baseline_lsn"):
+        if not isinstance(value.get(key), str) or not LSN_PATTERN.fullmatch(value[key]):
+            raise ValueError(f"LSN inválido no baseline CDC de {table_name}: {key}")
+    if not isinstance(value.get("capture_instance"), str) or not value["capture_instance"]:
+        raise ValueError(f"Capture instance ausente no baseline CDC de {table_name}")
+    baseline_bytes = bytes.fromhex(value["baseline_lsn"][2:])
+    if baseline_bytes < bytes.fromhex(value["capture_start_lsn"][2:]):
+        raise ValueError(f"Baseline CDC anterior ao início da captura de {table_name}")
+    if baseline_bytes < bytes.fromhex(value["min_lsn_at_baseline"][2:]):
+        raise ValueError(f"Baseline CDC fora da retenção para {table_name}")
+    return value
+
+
+def load_manifest(
+    blob: storage.Blob,
+    expected_run_id: str,
+    expected_table: str,
+    incremental_strategy: str,
+    expected_cdc_baseline: dict[str, Any] | None,
+) -> dict[str, Any]:
     if not blob.exists():
         raise FileNotFoundError(f"Manifesto ausente: gs://{blob.bucket.name}/{blob.name}")
     manifest = json.loads(blob.download_as_text())
     if (
-        manifest.get("status") != "SUCCEEDED"
+        manifest.get("manifest_version") != 2
+        or manifest.get("incremental_strategy", "full_refresh") != incremental_strategy
+        or manifest.get("status") != "SUCCEEDED"
         or manifest.get("run_id") != expected_run_id
         or manifest.get("table_name") != expected_table
         or manifest.get("load_mode") != "full"
@@ -75,6 +100,15 @@ def load_manifest(blob: storage.Blob, expected_run_id: str, expected_table: str)
         or manifest.get("reconciliation", {}).get("status") != "MATCHED"
     ):
         raise ValueError(f"Manifesto inválido ou incompatível: gs://{blob.bucket.name}/{blob.name}")
+    baseline = manifest.get("cdc_baseline")
+    if incremental_strategy == "cdc":
+        baseline = validate_cdc_baseline(baseline, expected_table)
+        if baseline != expected_cdc_baseline:
+            raise ValueError(f"Baseline CDC não corresponde ao manifesto geral para {expected_table}")
+        if not manifest.get("cdc_baseline_captured_at"):
+            raise ValueError(f"Manifesto sem horário do baseline CDC para {expected_table}")
+    elif baseline is not None:
+        raise ValueError(f"Tabela full_refresh {expected_table} não deve ter baseline CDC")
     return manifest
 
 
@@ -184,13 +218,26 @@ def main() -> None:
             )
         run_manifest = json.loads(run_manifest_blob.download_as_text())
         configured_names = {export["name"] for export in exports}
+        cdc_export_names = {
+            export["name"]
+            for export in exports
+            if export.get("incremental_strategy") == "cdc"
+        }
+        cdc_baselines = run_manifest.get("cdc_baselines", {})
         if (
-            run_manifest.get("status") != "SUCCEEDED"
+            run_manifest.get("manifest_version") != 2
+            or run_manifest.get("status") != "SUCCEEDED"
             or run_manifest.get("run_id") != args.run_id
             or set(run_manifest.get("table_names", [])) != configured_names
             or run_manifest.get("snapshot_isolation") != "SNAPSHOT"
+            or not isinstance(cdc_baselines, dict)
+            or set(cdc_baselines) != cdc_export_names
         ):
             raise ValueError("Manifesto geral do run não corresponde à configuração habilitada")
+        for table_name, baseline in cdc_baselines.items():
+            validate_cdc_baseline(baseline, table_name)
+        if cdc_export_names and not run_manifest.get("cdc_baseline_captured_at"):
+            raise ValueError("Manifesto geral sem horário de captura do baseline CDC")
 
         extract_date = datetime.strptime(args.run_id[:8], "%Y%m%d").strftime("%Y-%m-%d")
         run_table_results = []
@@ -205,7 +252,11 @@ def main() -> None:
             )
             prefix = f"{object_prefix}/"
             manifest = load_manifest(
-                bucket.blob(f"{prefix}_SUCCESS.json"), args.run_id, export["name"]
+                bucket.blob(f"{prefix}_SUCCESS.json"),
+                args.run_id,
+                export["name"],
+                export.get("incremental_strategy", "full_refresh"),
+                cdc_baselines.get(export["name"]),
             )
             parquet_objects = verify_parquet_objects(
                 storage_client, bucket_name, prefix, manifest
@@ -279,7 +330,7 @@ def main() -> None:
                 bigquery_client, staging_table_id, staging_ttl_days
             )
             table_success = {
-                "manifest_version": 1,
+                "manifest_version": 2,
                 "status": "SUCCEEDED",
                 "run_id": args.run_id,
                 "table_name": result["export"]["name"],
@@ -288,6 +339,7 @@ def main() -> None:
                 "bigquery_load_job_id": result["load_job"].job_id,
                 "bigquery_copy_job_id": copy_job.job_id,
                 "loaded_rows": expected_rows,
+                "cdc_baseline": result["manifest"].get("cdc_baseline"),
                 "file_count": len(result["parquet_objects"]),
                 "completed_at": datetime.now(timezone.utc).isoformat(),
                 "reconciliation": {
@@ -310,12 +362,17 @@ def main() -> None:
             bucket,
             f"{base_prefix}/_runs/run_id={args.run_id}/_BIGQUERY_RUN_SUCCESS.json",
             {
-                "manifest_version": 1,
+                "manifest_version": 2,
                 "status": "SUCCEEDED",
                 "run_id": args.run_id,
                 "bronze_dataset": bronze_dataset_id,
                 "staging_dataset": staging_dataset_id,
                 "table_names": [result["table_name"] for result in promoted_tables],
+                "cdc_baselines": {
+                    result["table_name"]: result["cdc_baseline"]
+                    for result in promoted_tables
+                    if result["cdc_baseline"] is not None
+                },
                 "completed_at": datetime.now(timezone.utc).isoformat(),
             },
         )

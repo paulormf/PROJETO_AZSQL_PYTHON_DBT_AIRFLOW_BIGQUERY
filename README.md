@@ -104,6 +104,32 @@ finally:
 Use `text()` para consultas parametrizadas do SQLAlchemy e não concatene valores
 de entrada diretamente em SQL.
 
+### Inspecionar CDC para planejar o incremental
+
+Antes de extrair mudanças, consulte quais tabelas estão habilitadas no CDC, os capture instances, o intervalo de LSN retido, a retenção configurada e as chaves primárias/únicas:
+
+```powershell
+python -m scripts.inspect_azure_sql_cdc
+```
+
+Esse comando é somente leitura e mostra metadados, não os registros das tabelas. Use o relatório para confirmar se todas as tabelas de `config/gcs_exports.yaml` estão sendo capturadas e se há uma chave utilizável para aplicar inserções, atualizações e exclusões.
+
+O YAML marca `order_items`, `orders` e `products` com `incremental_strategy: cdc`; as demais tabelas usam `full_refresh`. O arquivo SQL habilita CDC somente para as três tabelas CDC e ignora as que já estão capturadas. Execute-o manualmente na base de origem com uma conta autorizada, não com a credencial somente leitura do pipeline; depois, confirme com `python -m scripts.inspect_azure_sql_cdc` que as três aparecem como `TRACKED`.
+
+### Bootstrap do baseline CDC
+
+O pipeline continua fazendo uma carga full de todas as tabelas habilitadas. Antes de abrir a transação `SNAPSHOT`, ele lê `sys.fn_cdc_get_max_lsn()` e valida a capture instance, o LSN inicial e o limite mínimo retido de cada tabela configurada para CDC. O LSN de referência e esses metadados são gravados nos manifestos `_SUCCESS.json` e `_RUN_SUCCESS.json`. O carregador exige esses valores e os copia para `_BIGQUERY_SUCCESS.json` e `_BIGQUERY_RUN_SUCCESS.json`; assim, um run full antigo, sem baseline, não pode ser promovido como baseline CDC.
+
+Com as três tabelas rastreadas, execute um novo full e carregue exatamente o `RUN_ID` impresso:
+
+```powershell
+python -m pipelines.azure_sql_to_gcs
+$runId = Read-Host "Informe o RUN_ID impresso pela extração"
+python -m pipelines.gcs_parquet_to_bigquery --run-id $runId
+```
+
+O watermark é capturado antes do snapshot. Mudanças confirmadas depois dele serão consumidas no incremental; algumas também podem estar refletidas no snapshot, então a aplicação no destino deverá ser idempotente. A leitura incremental deverá iniciar no LSN seguinte ao watermark, pois as funções CDC usam limites inclusivos. Este código prepara e valida o baseline, mas ainda não implementa a extração/aplicação incremental nem o armazenamento durável do checkpoint após cada lote. Não inicie um segundo baseline concorrente; conclua o carregamento BigQuery desse run e guarde seu `RUN_ID` e os manifestos de sucesso.
+
 ## Segurança
 
 - Mantenha criptografia TLS habilitada e validação do certificado ativa.
