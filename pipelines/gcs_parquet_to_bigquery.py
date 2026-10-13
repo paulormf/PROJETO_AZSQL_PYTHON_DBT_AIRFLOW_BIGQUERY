@@ -15,6 +15,11 @@ from google.api_core.exceptions import GoogleAPICallError, NotFound, Preconditio
 from google.cloud import bigquery, storage
 
 from src.export_config import load_enabled_exports
+from src.sql_schema import (
+    SCHEMA_CONTRACT_VERSION,
+    bigquery_schema_fields,
+    compare_contract_types,
+)
 
 
 RUN_ID_PATTERN = re.compile(r"^\d{8}T\d{6}Z-[0-9a-f]{8}$")
@@ -230,6 +235,14 @@ def load_manifest(
     ):
         raise ValueError(f"Manifesto inválido ou incompatível: gs://{blob.bucket.name}/{blob.name}")
     baseline = manifest.get("cdc_baseline")
+    schema_contract = manifest.get("schema_contract")
+    if (
+        not isinstance(schema_contract, dict)
+        or schema_contract.get("version") != SCHEMA_CONTRACT_VERSION
+        or not isinstance(schema_contract.get("fields"), list)
+        or not schema_contract["fields"]
+    ):
+        raise ValueError(f"Schema contract missing or unsupported for {expected_table}")
     if incremental_strategy == "cdc":
         baseline = validate_cdc_baseline(baseline, expected_table)
         if baseline != expected_cdc_baseline:
@@ -415,6 +428,10 @@ def main() -> None:
                 staging_table_id,
                 job_config=bigquery.LoadJobConfig(
                     source_format=bigquery.SourceFormat.PARQUET,
+                    schema=[
+                        bigquery.SchemaField(**field)
+                        for field in bigquery_schema_fields(manifest["schema_contract"])
+                    ],
                     create_disposition=bigquery.CreateDisposition.CREATE_IF_NEEDED,
                     write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
                 ),
@@ -423,6 +440,15 @@ def main() -> None:
             load_job.result()
             expected_rows = int(manifest["exported_count"])
             staged_table = bigquery_client.get_table(staging_table_id)
+            missing, unexpected, mismatches = compare_contract_types(
+                manifest["schema_contract"], staged_table.schema
+            )
+            if missing or unexpected or mismatches:
+                raise ValueError(
+                    f"BigQuery staging schema differs from the extraction contract for "
+                    f"{export['name']}: missing={missing}, unexpected={unexpected}, "
+                    f"type_mismatches={mismatches}"
+                )
             if int(staged_table.num_rows) != expected_rows:
                 raise RuntimeError(
                     f"Reconciliação do staging falhou para {staging_table_id}: "

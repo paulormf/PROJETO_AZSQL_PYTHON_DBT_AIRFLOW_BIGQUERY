@@ -12,14 +12,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import pandas as pd
 from dotenv import load_dotenv
 from google.api_core.exceptions import NotFound
 from google.cloud import bigquery, storage
+import pyarrow as pa
+import pyarrow.parquet as pq
 from sqlalchemy import Connection, Engine, text
 
 from src.azure_sql import get_engine
 from src.export_config import load_enabled_exports, quote_identifier
+from src.sql_schema import contract_document, get_source_schema, iter_arrow_tables
 
 
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -94,25 +96,8 @@ def get_checkpoints(
     return checkpoints
 
 
-def get_source_columns(connection: Connection, export: dict[str, Any]) -> list[str]:
-    configured_columns = export["columns"]
-    if configured_columns != "*":
-        columns = configured_columns
-    else:
-        rows = connection.execute(
-            text(
-                """
-                SELECT c.name
-                FROM sys.columns AS c
-                INNER JOIN sys.tables AS t ON t.object_id = c.object_id
-                INNER JOIN sys.schemas AS s ON s.schema_id = t.schema_id
-                WHERE s.name = :schema_name AND t.name = :table_name
-                ORDER BY c.column_id
-                """
-            ),
-            {"schema_name": export["schema"], "table_name": export["table"]},
-        ).scalars().all()
-        columns = list(rows)
+def validate_source_schema(export: dict[str, Any], source_schema: pa.Schema) -> list[str]:
+    columns = source_schema.names
     if not columns:
         raise RuntimeError(f"No source columns found for {export['schema']}.{export['table']}")
     for column in columns:
@@ -188,39 +173,45 @@ def export_changes(
     to_lsn: bytes,
     object_prefix: str,
     chunk_rows: int,
+    source_schema: pa.Schema,
 ) -> dict[str, Any]:
-    columns = get_source_columns(connection, export)
-    query = text(build_changes_query(capture_instance, columns))
-    chunks = pd.read_sql_query(
-        query,
+    columns = source_schema.names
+    query = build_changes_query(capture_instance, columns)
+    query_schema = pa.schema(
+        [
+            pa.field("_cdc_start_lsn", pa.binary(), nullable=True),
+            pa.field("_cdc_seqval", pa.binary(), nullable=True),
+            pa.field("_cdc_operation", pa.int64(), nullable=False),
+            pa.field("_cdc_update_mask", pa.binary(), nullable=True),
+            *source_schema,
+        ]
+    )
+    chunks = iter_arrow_tables(
         connection,
-        params={"from_lsn": from_lsn, "to_lsn": to_lsn},
-        chunksize=chunk_rows,
-        dtype_backend="pyarrow",
+        query,
+        {"from_lsn": from_lsn, "to_lsn": to_lsn},
+        chunk_rows,
+        query_schema,
     )
     files: list[dict[str, Any]] = []
     total_rows = 0
-    for part_number, dataframe in enumerate(chunks, start=1):
-        for column in ("_cdc_start_lsn", "_cdc_seqval", "_cdc_update_mask"):
-            dataframe[column] = dataframe[column].map(
-                lambda value: (
-                    value.tobytes()
-                    if isinstance(value, memoryview)
-                    else bytes(value)
-                    if isinstance(value, bytearray)
-                    else value
-                )
-            )
-        dataframe["_cdc_ingested_at"] = datetime.now(timezone.utc)
+    for part_number, arrow_table in enumerate(chunks, start=1):
+        ingested_at = pa.array(
+            [datetime.now(timezone.utc)] * arrow_table.num_rows,
+            type=pa.timestamp("us", tz="UTC"),
+        )
+        arrow_table = arrow_table.append_column(
+            pa.field("_cdc_ingested_at", pa.timestamp("us", tz="UTC"), nullable=False),
+            ingested_at,
+        )
         object_name = f"{object_prefix}/part-{part_number:05d}.parquet"
         with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
             parquet_path = Path(tmp.name)
         try:
-            dataframe.to_parquet(
+            pq.write_table(
+                arrow_table,
                 parquet_path,
-                engine="pyarrow",
                 compression="snappy",
-                index=False,
             )
             blob = bucket.blob(object_name)
             blob.upload_from_filename(
@@ -231,12 +222,17 @@ def export_changes(
             blob.reload()
         finally:
             parquet_path.unlink(missing_ok=True)
-        row_count = len(dataframe)
+        row_count = arrow_table.num_rows
         total_rows += row_count
         files.append({"name": object_name, "rows": row_count, "size_bytes": blob.size})
         print(f"{export['name']}: CDC enviou {row_count} registros para gs://{bucket.name}/{object_name}")
-        del dataframe
-    return {"change_count": total_rows, "file_count": len(files), "files": files}
+        del arrow_table
+    return {
+        "change_count": total_rows,
+        "file_count": len(files),
+        "files": files,
+        "schema_contract": contract_document(source_schema),
+    }
 
 
 def main() -> None:
@@ -289,6 +285,13 @@ def main() -> None:
                     connection.execute(text("SELECT sys.fn_cdc_get_max_lsn()")).scalar_one()
                 )
                 for export in exports:
+                    source_schema = get_source_schema(
+                        connection,
+                        export["schema"],
+                        export["table"],
+                        export["columns"],
+                    )
+                    validate_source_schema(export, source_schema)
                     checkpoint = checkpoints[export["name"]]
                     if (
                         checkpoint["source_schema"] != export["schema"]
@@ -324,6 +327,7 @@ def main() -> None:
                                 "change_count": 0,
                                 "file_count": 0,
                                 "files": [],
+                                "schema_contract": contract_document(source_schema),
                             }
                         )
                         continue
@@ -360,6 +364,7 @@ def main() -> None:
                             to_lsn_bytes,
                             object_prefix,
                             chunk_rows,
+                            source_schema,
                         )
                     table_results.append(
                         {
@@ -396,6 +401,7 @@ def main() -> None:
                 "change_count": result["change_count"],
                 "file_count": result["file_count"],
                 "files": result["files"],
+                "schema_contract": result["schema_contract"],
                 "reconciliation": {"status": "MATCHED", "change_count": result["change_count"]},
             }
             write_json_marker(bucket, f"{object_prefix}/_SUCCESS.json", manifest)

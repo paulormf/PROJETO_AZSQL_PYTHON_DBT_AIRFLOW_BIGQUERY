@@ -28,6 +28,15 @@ credenciais em scripts, notebooks ou commits.
 
 ## Exportar Azure SQL para GCS como Parquet
 
+O contrato de schema compartilhado por full e CDC fica em `src/sql_schema.py`.
+Ele consulta os tipos da tabela no catálogo do Azure SQL, aplica um mapeamento
+versionado para Arrow/Parquet e registra o contrato no manifesto. Os dois
+carregadores informam schema explícito ao BigQuery e validam as tabelas de
+staging; o CDC também compara o contrato com a tabela Bronze antes de aplicar
+alterações. Tipos SQL sem mapeamento causam falha antes de publicar o manifesto
+de sucesso. Ao alterar o schema da origem, faça uma migração/rebaseline
+intencional antes de retomar o CDC.
+
 O pipeline usa uma transação `SNAPSHOT` única para contar e extrair todas as tabelas habilitadas. Os manifestos por tabela e `_RUN_SUCCESS.json` só são publicados depois do commit. A transação longa pode reter versões de linhas e consumir recursos na origem; para bases muito grandes, prefira extrair de uma cópia transacional do banco ou use uma estratégia de bootstrap coordenada com CDC.
 
 Neste projeto, `columns: "*"` no YAML leva todas as colunas da origem. O script compara `COUNT_BIG(*)` na origem com as linhas exportadas. Só publica `_SUCCESS.json` após todos os Parquet serem enviados e as contagens coincidirem; divergência gera `_FAILED.json`. O manifesto lista cada objeto, suas linhas e seu tamanho. Uma falha antes da publicação do marcador significa que a execução está incompleta.

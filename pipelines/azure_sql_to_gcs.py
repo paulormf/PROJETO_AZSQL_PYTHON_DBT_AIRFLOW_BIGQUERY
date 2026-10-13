@@ -10,13 +10,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import pandas as pd
 from dotenv import load_dotenv
 from google.cloud import storage
+import pyarrow.parquet as pq
 from sqlalchemy import Connection, Engine, text
 
 from src.azure_sql import get_engine
 from src.export_config import build_count_query, build_select_query, load_enabled_exports
+from src.sql_schema import contract_document, get_source_schema, iter_arrow_tables
 
 
 def required_setting(name: str) -> str:
@@ -40,24 +41,27 @@ def export_table(
     total_rows = 0
     files: list[dict[str, Any]] = []
     query = build_select_query(export)
-    chunks = pd.read_sql_query(
-        query,
+    source_schema = get_source_schema(
+        connection, export["schema"], export["table"], export["columns"]
+    )
+    chunks = iter_arrow_tables(
         connection,
-        chunksize=chunk_rows,
-        dtype_backend="pyarrow",
+        query,
+        None,
+        chunk_rows,
+        source_schema,
     )
 
-    for part_number, dataframe in enumerate(chunks, start=1):
+    for part_number, arrow_table in enumerate(chunks, start=1):
         object_name = f"{object_prefix}/part-{part_number:05d}.parquet"
         with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
             parquet_path = Path(tmp.name)
 
         try:
-            dataframe.to_parquet(
+            pq.write_table(
+                arrow_table,
                 parquet_path,
-                engine="pyarrow",
                 compression="snappy",
-                index=False,
             )
             blob = bucket.blob(object_name)
             blob.upload_from_filename(
@@ -68,18 +72,19 @@ def export_table(
         finally:
             parquet_path.unlink(missing_ok=True)
 
-        row_count = len(dataframe)
+        row_count = arrow_table.num_rows
         total_rows += row_count
         blob.reload()
         files.append({"name": object_name, "rows": row_count, "size_bytes": blob.size})
         print(f"{export['name']}: enviado gs://{bucket.name}/{object_name} ({row_count} linhas)")
-        del dataframe
+        del arrow_table
 
     return {
         "source_count": source_count,
         "exported_count": total_rows,
         "file_count": len(files),
         "files": files,
+        "schema_contract": contract_document(source_schema),
     }
 
 
@@ -257,6 +262,7 @@ def main() -> None:
                 "exported_count": result["exported_count"],
                 "file_count": result["file_count"],
                 "files": result["files"],
+                "schema_contract": result["schema_contract"],
                 "reconciliation": {
                     "status": "MATCHED",
                     "source_count": result["source_count"],

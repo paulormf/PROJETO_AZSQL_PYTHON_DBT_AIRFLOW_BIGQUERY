@@ -15,6 +15,11 @@ from google.api_core.exceptions import GoogleAPICallError, NotFound, Preconditio
 from google.cloud import bigquery, storage
 
 from src.export_config import load_enabled_exports
+from src.sql_schema import (
+    SCHEMA_CONTRACT_VERSION,
+    bigquery_schema_fields,
+    compare_contract_types,
+)
 
 
 RUN_ID_PATTERN = re.compile(r"^\d{8}T\d{6}Z-[0-9a-f]{8}$")
@@ -101,6 +106,14 @@ def load_batch_manifest(
         != manifest.get("change_count")
     ):
         raise ValueError(f"Invalid CDC manifest: gs://{bucket.name}/{blob.name}")
+    contract = manifest.get("schema_contract")
+    if (
+        not isinstance(contract, dict)
+        or contract.get("version") != SCHEMA_CONTRACT_VERSION
+        or not isinstance(contract.get("fields"), list)
+        or not contract["fields"]
+    ):
+        raise ValueError(f"Missing or unsupported schema contract for {export['name']}")
     validate_lsn(manifest.get("previous_lsn"), "previous_lsn")
     validate_lsn(manifest.get("to_lsn"), "to_lsn")
     if manifest["status"] == "SUCCEEDED":
@@ -444,6 +457,17 @@ def main() -> None:
             verify_batch_objects(
                 storage_client, bucket_name, object_prefix, manifest
             )
+            bronze_table_id = f"{bronze_dataset_id}.{table}"
+            bronze_table = bq_client.get_table(bronze_table_id)
+            missing, unexpected, mismatches = compare_contract_types(
+                manifest["schema_contract"], bronze_table.schema
+            )
+            if missing or unexpected or mismatches:
+                raise ValueError(
+                    f"Azure schema contract differs from Bronze table {bronze_table_id}: "
+                    f"missing={missing}, unexpected={unexpected}, type_mismatches={mismatches}. "
+                    "Run an intentional full rebaseline/schema migration first."
+                )
             if manifest["status"] == "NO_CHANGES":
                 checkpoint = checkpoints[export["name"]]
                 if (
@@ -509,6 +533,19 @@ def main() -> None:
                     staging_table_id,
                     job_config=bigquery.LoadJobConfig(
                         source_format=bigquery.SourceFormat.PARQUET,
+                        schema=[
+                            bigquery.SchemaField("_cdc_start_lsn", "BYTES", mode="NULLABLE"),
+                            bigquery.SchemaField("_cdc_seqval", "BYTES", mode="NULLABLE"),
+                            bigquery.SchemaField("_cdc_operation", "INTEGER", mode="REQUIRED"),
+                            bigquery.SchemaField("_cdc_update_mask", "BYTES", mode="NULLABLE"),
+                            *[
+                                bigquery.SchemaField(**field)
+                                for field in bigquery_schema_fields(manifest["schema_contract"])
+                            ],
+                            bigquery.SchemaField(
+                                "_cdc_ingested_at", "TIMESTAMP", mode="REQUIRED"
+                            ),
+                        ],
                         create_disposition=bigquery.CreateDisposition.CREATE_IF_NEEDED,
                         write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
                     ),
@@ -524,7 +561,6 @@ def main() -> None:
                 source_columns = validate_stage_data(
                     bq_client, staging_table_id, export, location
                 )
-                bronze_table_id = f"{bronze_dataset_id}.{table}"
                 missing_columns, unexpected_columns, type_mismatches = (
                     compare_bronze_and_stage_schemas(
                         bq_client, bronze_table_id, staging_table_id, location
