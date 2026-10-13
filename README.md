@@ -118,7 +118,7 @@ O YAML marca `order_items`, `orders` e `products` com `incremental_strategy: cdc
 
 ### Bootstrap do baseline CDC
 
-O pipeline continua fazendo uma carga full de todas as tabelas habilitadas. Antes de abrir a transação `SNAPSHOT`, ele lê `sys.fn_cdc_get_max_lsn()` e valida a capture instance, o LSN inicial e o limite mínimo retido de cada tabela configurada para CDC. O LSN de referência e esses metadados são gravados nos manifestos `_SUCCESS.json` e `_RUN_SUCCESS.json`. O carregador exige esses valores e os copia para `_BIGQUERY_SUCCESS.json` e `_BIGQUERY_RUN_SUCCESS.json`; assim, um run full antigo, sem baseline, não pode ser promovido como baseline CDC.
+O pipeline continua fazendo uma carga full de todas as tabelas habilitadas. Antes de abrir a transação `SNAPSHOT`, ele lê `sys.fn_cdc_get_max_lsn()` e valida a capture instance, o LSN inicial e o limite mínimo retido de cada tabela configurada para CDC. O LSN de referência e esses metadados são gravados nos manifestos `_SUCCESS.json` e `_RUN_SUCCESS.json`. Depois de promover o full, o carregador inicializa `PROJECT_1_BRONZE._cdc_checkpoints`. Se já houver um checkpoint diferente, a promoção falha para evitar reiniciar o estado incremental silenciosamente.
 
 Com as três tabelas rastreadas, execute um novo full e carregue exatamente o `RUN_ID` impresso:
 
@@ -128,7 +128,30 @@ $runId = Read-Host "Informe o RUN_ID impresso pela extração"
 python -m pipelines.gcs_parquet_to_bigquery --run-id $runId
 ```
 
-O watermark é capturado antes do snapshot. Mudanças confirmadas depois dele serão consumidas no incremental; algumas também podem estar refletidas no snapshot, então a aplicação no destino deverá ser idempotente. A leitura incremental deverá iniciar no LSN seguinte ao watermark, pois as funções CDC usam limites inclusivos. Este código prepara e valida o baseline, mas ainda não implementa a extração/aplicação incremental nem o armazenamento durável do checkpoint após cada lote. Não inicie um segundo baseline concorrente; conclua o carregamento BigQuery desse run e guarde seu `RUN_ID` e os manifestos de sucesso.
+O watermark é capturado antes do snapshot. Mudanças confirmadas depois dele podem também estar refletidas no snapshot; a aplicação incremental é idempotente. Não inicie um segundo baseline concorrente; conclua o carregamento BigQuery e guarde o `RUN_ID` e os manifestos de sucesso.
+
+### Executar o incremental CDC
+
+`config/gcs_exports.yaml` declara a chave primária de cada tabela CDC. O extrator `pipelines/azure_sql_cdc_to_gcs.py` lê o checkpoint no BigQuery, valida capture instance e retenção e extrai `all_changes` em chunks Parquet. Isso preserva eventos de inserção, atualização e exclusão no GCS. O aplicador `pipelines/gcs_cdc_to_bigquery.py` carrega o lote em staging, registra os eventos em uma tabela `_cdc_history_<tabela>` particionada pelo horário de ingestão e agrupada pela chave e aplica o último evento de cada chave à tabela Bronze corrente. Histórico, Bronze e checkpoint são atualizados numa transação BigQuery; reprocessar o mesmo `RUN_ID` não duplica eventos nem avança o checkpoint duas vezes.
+
+As tabelas `_cdc_history_*` e os Parquet CDC conservam os dados das alterações, inclusive valores de linhas excluídas. Defina a retenção e o processo de atendimento a solicitações de eliminação antes de usar dados pessoais reais; configure também a política de ciclo de vida do bucket.
+
+Como o código atual já carregou o baseline, execute novamente o carregador full com o mesmo `RUN_ID` para inicializar o checkpoint durável (ele falha se o checkpoint já existir em outro LSN):
+
+```powershell
+$baselineRunId = Read-Host "RUN_ID do full cujo manifesto contém os LSN"
+python -m pipelines.gcs_parquet_to_bigquery --run-id $baselineRunId
+```
+
+Depois execute e aplique um lote CDC:
+
+```powershell
+python -m pipelines.azure_sql_cdc_to_gcs
+$cdcRunId = Read-Host "CDC_RUN_ID impresso pela extração"
+python -m pipelines.gcs_cdc_to_bigquery --run-id $cdcRunId
+```
+
+Execute extração e aplicação sequencialmente, sem runs concorrentes para as mesmas tabelas. Uma falha de retenção indica que o checkpoint ficou anterior ao `min_lsn`; nesse caso, pare o incremental, gere um novo full e carregue-o com `--reset-cdc-checkpoints` para recomeçar intencionalmente o baseline. Sem essa opção, um full cujo LSN não corresponda ao checkpoint existente falha antes de substituir as tabelas Bronze. O `min_lsn` é o limite inferior atualmente disponível para a capture instance. As funções CDC incluem os limites `from_lsn` e `to_lsn`; por isso, o extrator começa com `sys.fn_cdc_increment_lsn(last_lsn)`. [Documentação da Microsoft sobre CDC e intervalos LSN](https://learn.microsoft.com/en-us/sql/relational-databases/track-changes/work-with-change-data-sql-server?view=sql-server-ver17)
 
 ## Segurança
 

@@ -76,6 +76,24 @@ def load_enabled_exports(config_path: Path) -> list[dict[str, Any]]:
                 f"{strategy!r}; use 'cdc' or 'full_refresh'"
             )
         export["incremental_strategy"] = strategy
+        primary_key = export.get("primary_key")
+        if strategy == "cdc":
+            if not isinstance(primary_key, list) or not primary_key:
+                raise ValueError(
+                    f"CDC export '{export.get('name')}' must define a non-empty primary_key list"
+                )
+            for column in primary_key:
+                quote_identifier(column)
+            if len(set(primary_key)) != len(primary_key):
+                raise ValueError(f"CDC export '{export.get('name')}' has duplicate primary_key columns")
+            if export["columns"] != "*" and not set(primary_key).issubset(export["columns"]):
+                raise ValueError(
+                    f"CDC export '{export.get('name')}' must include primary_key columns in columns"
+                )
+        elif primary_key is not None:
+            raise ValueError(
+                f"Export '{export.get('name')}' defines primary_key but does not use CDC"
+            )
 
         name = export["name"]
         quote_identifier(name)

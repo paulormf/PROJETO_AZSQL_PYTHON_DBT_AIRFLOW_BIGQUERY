@@ -79,6 +79,135 @@ def validate_cdc_baseline(value: Any, table_name: str) -> dict[str, str]:
     return value
 
 
+def initialize_cdc_checkpoints(
+    client: bigquery.Client,
+    dataset_id: str,
+    exports: list[dict[str, Any]],
+    baselines: dict[str, dict[str, str]],
+    run_id: str,
+    location: str,
+    reset_existing: bool,
+) -> None:
+    """Create one durable checkpoint per CDC table after the full is promoted."""
+    table_id = f"{dataset_id}._cdc_checkpoints"
+    try:
+        client.get_table(table_id)
+    except NotFound:
+        checkpoint_table = bigquery.Table(
+            table_id,
+            schema=[
+                bigquery.SchemaField("table_name", "STRING", mode="REQUIRED"),
+                bigquery.SchemaField("source_schema", "STRING", mode="REQUIRED"),
+                bigquery.SchemaField("source_table", "STRING", mode="REQUIRED"),
+                bigquery.SchemaField("capture_instance", "STRING", mode="REQUIRED"),
+                bigquery.SchemaField("last_lsn", "STRING", mode="REQUIRED"),
+                bigquery.SchemaField("baseline_run_id", "STRING", mode="REQUIRED"),
+                bigquery.SchemaField("last_run_id", "STRING", mode="REQUIRED"),
+                bigquery.SchemaField("updated_at", "TIMESTAMP", mode="REQUIRED"),
+            ],
+        )
+        client.create_table(checkpoint_table)
+
+    for export in exports:
+        if export.get("incremental_strategy") != "cdc":
+            continue
+        baseline = baselines[export["name"]]
+        sql = f"""
+        ASSERT @reset_existing OR NOT EXISTS (
+          SELECT 1 FROM `{table_id}`
+          WHERE table_name = @table_name
+            AND (source_schema != @source_schema OR source_table != @source_table
+              OR capture_instance != @capture_instance OR last_lsn != @baseline_lsn)
+        ) AS 'A CDC checkpoint already exists at a different baseline. Rebuild it explicitly before reinitializing.';
+        MERGE `{table_id}` AS target
+        USING (SELECT
+          @table_name AS table_name,
+          @source_schema AS source_schema,
+          @source_table AS source_table,
+          @capture_instance AS capture_instance,
+          @baseline_lsn AS last_lsn,
+          @run_id AS baseline_run_id,
+          @run_id AS last_run_id
+        ) AS source
+        ON target.table_name = source.table_name
+        WHEN MATCHED AND @reset_existing THEN
+          UPDATE SET source_schema = source.source_schema,
+            source_table = source.source_table,
+            capture_instance = source.capture_instance,
+            last_lsn = source.last_lsn,
+            baseline_run_id = source.baseline_run_id,
+            last_run_id = source.last_run_id,
+            updated_at = CURRENT_TIMESTAMP()
+        WHEN NOT MATCHED THEN
+          INSERT (table_name, source_schema, source_table, capture_instance, last_lsn, baseline_run_id, last_run_id, updated_at)
+          VALUES (source.table_name, source.source_schema, source.source_table, source.capture_instance, source.last_lsn, source.baseline_run_id, source.last_run_id, CURRENT_TIMESTAMP());
+        """
+        job = client.query(
+            sql,
+            location=location,
+            job_config=bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ScalarQueryParameter("table_name", "STRING", export["name"]),
+                    bigquery.ScalarQueryParameter("source_schema", "STRING", export["schema"]),
+                    bigquery.ScalarQueryParameter("source_table", "STRING", export["table"]),
+                    bigquery.ScalarQueryParameter(
+                        "capture_instance", "STRING", baseline["capture_instance"]
+                    ),
+                    bigquery.ScalarQueryParameter(
+                        "baseline_lsn", "STRING", baseline["baseline_lsn"]
+                    ),
+                    bigquery.ScalarQueryParameter("run_id", "STRING", run_id),
+                    bigquery.ScalarQueryParameter("reset_existing", "BOOL", reset_existing),
+                ]
+            ),
+        )
+        job.result()
+
+
+def validate_baseline_checkpoint_state(
+    client: bigquery.Client,
+    dataset_id: str,
+    exports: list[dict[str, Any]],
+    baselines: dict[str, dict[str, str]],
+    location: str,
+    reset_existing: bool,
+) -> None:
+    table_id = f"{dataset_id}._cdc_checkpoints"
+    try:
+        client.get_table(table_id)
+    except NotFound:
+        return
+    table_names = [
+        export["name"] for export in exports if export.get("incremental_strategy") == "cdc"
+    ]
+    rows = list(client.query(
+        f"SELECT table_name, source_schema, source_table, capture_instance, last_lsn "
+        f"FROM `{table_id}` WHERE table_name IN UNNEST(@table_names)",
+        location=location,
+        job_config=bigquery.QueryJobConfig(
+            query_parameters=[bigquery.ArrayQueryParameter("table_names", "STRING", table_names)]
+        ),
+    ).result())
+    row_names = [row.table_name for row in rows]
+    if len(set(row_names)) != len(row_names):
+        raise RuntimeError("Duplicate rows found in the CDC checkpoint table")
+    exports_by_name = {export["name"]: export for export in exports}
+    for row in rows:
+        export = exports_by_name[row.table_name]
+        baseline = baselines[row.table_name]
+        matches = (
+            row.source_schema == export["schema"]
+            and row.source_table == export["table"]
+            and row.capture_instance == baseline["capture_instance"]
+            and row.last_lsn == baseline["baseline_lsn"]
+        )
+        if not matches and not reset_existing:
+            raise RuntimeError(
+                f"Existing CDC checkpoint for {row.table_name} differs from this full baseline. "
+                "Use --reset-cdc-checkpoints only with an intentional fresh full rebaseline."
+            )
+
+
 def load_manifest(
     blob: storage.Blob,
     expected_run_id: str,
@@ -156,6 +285,11 @@ def main() -> None:
         description="Load a GCS snapshot to BigQuery staging, validate it, and promote to bronze."
     )
     parser.add_argument("--run-id", required=True, help="Run ID printed by the extraction pipeline")
+    parser.add_argument(
+        "--reset-cdc-checkpoints",
+        action="store_true",
+        help="Reset existing CDC checkpoints to this full snapshot for an intentional rebaseline",
+    )
     args = parser.parse_args()
     if not RUN_ID_PATTERN.fullmatch(args.run_id):
         raise ValueError("Invalid run ID format")
@@ -238,6 +372,15 @@ def main() -> None:
             validate_cdc_baseline(baseline, table_name)
         if cdc_export_names and not run_manifest.get("cdc_baseline_captured_at"):
             raise ValueError("Manifesto geral sem horário de captura do baseline CDC")
+        if cdc_export_names:
+            validate_baseline_checkpoint_state(
+                bigquery_client,
+                bronze_dataset_id,
+                exports,
+                cdc_baselines,
+                bronze_dataset.location,
+                args.reset_cdc_checkpoints,
+            )
 
         extract_date = datetime.strptime(args.run_id[:8], "%Y%m%d").strftime("%Y-%m-%d")
         run_table_results = []
@@ -356,6 +499,17 @@ def main() -> None:
             print(
                 f"Carga promovida para {bronze_table_id}: {expected_rows} linhas; "
                 f"staging {staging_table_id}."
+            )
+
+        if cdc_export_names:
+            initialize_cdc_checkpoints(
+                bigquery_client,
+                bronze_dataset_id,
+                exports,
+                cdc_baselines,
+                args.run_id,
+                bronze_dataset.location,
+                args.reset_cdc_checkpoints,
             )
 
         write_json_marker(

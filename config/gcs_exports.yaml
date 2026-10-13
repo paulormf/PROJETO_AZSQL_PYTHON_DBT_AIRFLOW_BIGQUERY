@@ -6,6 +6,8 @@ exports:
     table: order_items
     load_mode: full
     incremental_strategy: cdc
+    primary_key:
+      - order_item_id
     # This portfolio currently exports all source columns. Revisit data minimization
     # before using the same pattern with personal or production data.
     columns: "*"
@@ -17,6 +19,8 @@ exports:
     table: orders
     load_mode: full
     incremental_strategy: cdc
+    primary_key:
+      - order_id
     columns: "*"
     chunk_rows: 5000
 
@@ -26,6 +30,8 @@ exports:
     table: products
     load_mode: full
     incremental_strategy: cdc
+    primary_key:
+      - product_id
     columns: "*"
     chunk_rows: 5000
 
