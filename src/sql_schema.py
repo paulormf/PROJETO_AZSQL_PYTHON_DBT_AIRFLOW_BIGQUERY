@@ -238,7 +238,7 @@ def bigquery_schema_fields(contract: Mapping[str, Any]) -> list[dict[str, str]]:
     return [
         {
             "name": item["name"],
-            "type": types[item["name"]],
+            "field_type": types[item["name"]],
             "mode": "NULLABLE" if item["nullable"] else "REQUIRED",
         }
         for item in contract.get("fields", [])

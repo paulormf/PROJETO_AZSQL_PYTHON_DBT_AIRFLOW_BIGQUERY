@@ -1,9 +1,11 @@
 import unittest
 
 import pyarrow as pa
+from google.cloud import bigquery
 from sqlalchemy import create_engine
 
 from src.sql_schema import (
+    bigquery_schema_fields,
     bigquery_schema_types,
     compare_contract_types,
     contract_document,
@@ -63,6 +65,8 @@ class SqlSchemaContractTests(unittest.TestCase):
 
     def test_contract_maps_types_to_bigquery_and_detects_drift(self) -> None:
         contract = contract_document(self.schema)
+        fields = [bigquery.SchemaField(**field) for field in bigquery_schema_fields(contract)]
+        self.assertEqual(fields[0].field_type, "INTEGER")
         self.assertEqual(
             bigquery_schema_types(contract),
             {"id": "INTEGER", "payload": "BYTES", "amount": "NUMERIC"},
