@@ -1,0 +1,82 @@
+version: 2
+
+models:
+  - name: dim_date
+    description: One row per calendar date from the first order date through the current date in Sao Paulo time.
+    columns:
+      - name: date_key
+        description: Integer date key in YYYYMMDD format.
+        data_tests:
+          - not_null
+          - unique
+      - name: date_day
+        description: Calendar date in Sao Paulo time.
+        data_tests:
+          - not_null
+          - unique
+
+  - name: dim_customers
+    description: One row per customer, with attributes approved for general analytics. Direct identifiers are excluded.
+    columns:
+      - name: customer_id
+        description: Customer key used to join the dimension to sales facts.
+        data_tests:
+          - not_null
+          - unique
+
+  - name: dim_products
+    description: One row per product, enriched with its category name for analytics.
+    columns:
+      - name: product_id
+        description: Product key used to join the dimension to sales facts.
+        data_tests:
+          - not_null
+          - unique
+      - name: category_id
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('stg_categories')
+                field: category_id
+
+  - name: fct_sales
+    description: >-
+      Sales fact at order-item grain: one row per order_item_id. Order-level
+      measures such as discount and tax are excluded to avoid repeating them
+      across item rows.
+    columns:
+      - name: order_item_id
+        description: Order-line key; defines the grain of this fact.
+        data_tests:
+          - not_null
+          - unique
+      - name: order_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_orders')
+                field: order_id
+      - name: order_date_key
+        description: Foreign key to the order date in dim_date.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_date')
+                field: date_key
+      - name: customer_id
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_customers')
+                field: customer_id
+      - name: product_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_products')
+                field: product_id
+      - name: item_sales_amount
+        description: Sales amount for this individual order item.
