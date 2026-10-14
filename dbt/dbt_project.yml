@@ -1,0 +1,33 @@
+name: projeto_azsql_python_dbt_airflow_bigquery
+version: "1.0.0"
+config-version: 2
+
+profile: projeto_azsql_python_dbt_airflow_bigquery
+require-dbt-version: [">=1.12.0", "<2.0.0"]
+
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+target-path: "target"
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+models:
+  projeto_azsql_python_dbt_airflow_bigquery:
+    staging:
+      +schema: SILVER
+      +materialized: view
+      +tags: ["silver", "staging"]
+    intermediate:
+      +schema: SILVER
+      +materialized: view
+      +tags: ["silver", "intermediate"]
+    marts:
+      +schema: GOLD
+      +materialized: table
+      +tags: ["gold", "marts"]

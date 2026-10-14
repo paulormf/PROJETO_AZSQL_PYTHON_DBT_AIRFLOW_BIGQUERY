@@ -85,6 +85,55 @@ python -m pipelines.gcs_parquet_to_bigquery --run-id 20261009T172516Z-aeb16ae6
 
 O dataset Bronze recebe o snapshot full promovido. O dataset staging contém tabelas temporárias separadas por execução; não use um wildcard que cubra todos os `run_id`. O código valida a localização dos dois datasets e do bucket antes dos jobs.
 
+## Transformar Bronze em Silver com dbt
+
+O projeto dbt fica em `dbt/`, separado das dependências de ingestão. Ele declara
+as tabelas Bronze como `sources`, cria views de staging em
+`PROJECT_1_DEV_SILVER` durante o desenvolvimento e testa chaves primárias e
+relacionamentos entre itens, pedidos e produtos. As
+tabelas de clientes, contatos, endereços e funcionários ficam declaradas como
+sources, mas não são copiadas para Silver nesta primeira etapa; avalie finalidade,
+minimização e acesso antes de modelar dados potencialmente pessoais.
+
+O adaptador BigQuery do dbt v1 ainda não oferece suporte ao Python 3.14. Use um
+ambiente separado com Python 3.13 para não alterar o ambiente que executa os
+pipelines Python:
+
+```powershell
+py -3.13 -m venv .venv-dbt
+.\.venv-dbt\Scripts\Activate.ps1
+python -m pip install -r requirements-dbt.txt
+gcloud auth application-default login
+```
+
+O `profiles.yml` usa OAuth/ADC e variáveis de ambiente, sem chave de serviço no
+repositório. No PowerShell, configure as mesmas referências do `.env` para a
+sessão dbt:
+
+```powershell
+$env:GCP_PROJECT_ID = "<seu-project-id>"
+$env:BQ_BRONZE_DATASET = "PROJECT_1_BRONZE"
+$env:DBT_DEFAULT_DATASET = "PROJECT_1_DEV"
+$env:BQ_LOCATION = "us-central1"
+```
+
+Crie os datasets Silver e Gold de desenvolvimento na mesma região da Bronze e
+execute da raiz do repositório:
+
+```powershell
+bq --location=us-central1 mk --dataset "${env:GCP_PROJECT_ID}:PROJECT_1_DEV_SILVER"
+bq --location=us-central1 mk --dataset "${env:GCP_PROJECT_ID}:PROJECT_1_DEV_GOLD"
+dbt debug --project-dir dbt --profiles-dir dbt
+dbt build --project-dir dbt --profiles-dir dbt
+```
+
+`dbt build` compila e executa os modelos e os testes declarados. As fontes usam
+`source()` e os modelos downstream usam `ref()`, permitindo ao dbt organizar a
+linhagem e a ordem de execução. Os modelos staging/intermediate ficam em
+`PROJECT_1_DEV_SILVER` e os marts em `PROJECT_1_DEV_GOLD` durante o desenvolvimento;
+as transformações de negócio e modelos de fatos/dimensões serão uma próxima
+etapa após inspecionarmos as colunas e regras das tabelas.
+
 ### Verificar a conexão com Azure SQL
 
 Execute o exemplo a partir da raiz do repositório:

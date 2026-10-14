@@ -1,0 +1,31 @@
+version: 2
+
+sources:
+  - name: azure_sql_bronze
+    description: Tables landed from Azure SQL and maintained by the Python ingestion pipelines.
+    database: "{{ env_var('GCP_PROJECT_ID') }}"
+    schema: "{{ env_var('BQ_BRONZE_DATASET', 'PROJECT_1_BRONZE') }}"
+    tables:
+      - name: order_items
+        description: Raw current-state order line items from Azure SQL.
+
+      - name: orders
+        description: Raw current-state orders from Azure SQL.
+
+      - name: products
+        description: Raw current-state products from Azure SQL.
+
+      - name: customers
+        description: Potentially personal data. Keep access restricted and assess minimization before modeling.
+      
+      - name: categories
+        description: Raw product categories from Azure SQL.
+      
+      - name: customer_addresses
+        description: Personal data. Do not expose in Silver until purpose, minimization, and access controls are defined.
+      
+      - name: customer_contacts
+        description: Personal data. Do not expose in Silver until purpose, minimization, and access controls are defined.
+      
+      - name: employees
+        description: Potentially personal data. Keep access restricted and assess minimization before modeling.

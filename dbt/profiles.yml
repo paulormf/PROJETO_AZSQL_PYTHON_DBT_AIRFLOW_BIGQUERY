@@ -1,0 +1,15 @@
+projeto_azsql_python_dbt_airflow_bigquery:
+  target: dev
+  outputs:
+    dev:
+      type: bigquery
+      method: oauth
+      project: "{{ env_var('GCP_PROJECT_ID') }}"
+      # Dataset base isolado para desenvolvimento. O macro generate_schema_name
+      # adiciona _SILVER ou _GOLD conforme a pasta do modelo.
+      dataset: "{{ env_var('DBT_DEFAULT_DATASET', 'PROJECT_1_DEV') }}"
+      location: "{{ env_var('BQ_LOCATION', 'us-central1') }}"
+      threads: 4
+      priority: interactive
+      job_execution_timeout_seconds: 300
+      job_retries: 1

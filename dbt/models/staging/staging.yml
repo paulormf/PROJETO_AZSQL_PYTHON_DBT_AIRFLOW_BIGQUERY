@@ -1,0 +1,61 @@
+version: 2
+
+models:
+  - name: stg_orders
+    description: Thin staging view over Bronze orders; business transformations belong downstream.
+    columns:
+      - name: order_id
+        description: Primary key from Azure SQL.
+        data_tests:
+          - not_null
+          - unique
+
+  - name: stg_order_items
+    description: Thin staging view over Bronze order items.
+    columns:
+      - name: order_item_id
+        description: Primary key from Azure SQL.
+        data_tests:
+          - not_null
+          - unique
+
+      - name: order_id
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('stg_orders')
+                field: order_id
+                
+      - name: product_id
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('stg_products')
+                field: product_id
+
+  - name: stg_products
+    description: Thin staging view over Bronze products.
+    columns:
+      - name: product_id
+        description: Primary key from Azure SQL.
+        data_tests:
+          - not_null
+          - unique
+
+  - name: stg_categories
+    description: Thin staging view over Bronze categories.
+    columns:
+      - name: category_id
+        description: Primary key from Azure SQL.
+        data_tests:
+          - not_null
+          - unique
+
+  - name: stg_customers
+    description: Thin staging view over Bronze customers.
+    columns:
+      - name: customer_id
+        description: Primary key from Azure SQL.
+        data_tests:
+          - not_null
+          - unique
