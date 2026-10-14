@@ -18,8 +18,12 @@ with source_customers as (
 
 select
     customer_id,
-    customer_type,
-    full_name,
+    case
+        when customer_type = 'INDIVIDUAL' then 'pessoa física'
+        when customer_type = 'COMPANY' then 'pessoa jurídica'
+        else 'desconhecido'
+    end as customer_type,
+    trim(initcap(full_name)) as full_name,
     case
         when cpf_digits is null then null
         when length(cpf_digits) <= 4 then repeat('*', length(cpf_digits))
@@ -51,6 +55,10 @@ select
         else concat(repeat('*', length(phone_digits) - 4), right(phone_digits, 4))
     end as phone,
     birth_date,
-    gender,
-    status
+    lower(gender) as gender,
+    case
+        when status = 'ACTIVE' then 'ativo'
+        when status = 'INACTIVE' then 'inativo'
+        else 'desconhecido'
+    end as status
 from source_customers

@@ -2,7 +2,7 @@ version: 2
 
 models:
   - name: stg_orders
-    description: Thin staging view over Bronze orders; business transformations belong downstream.
+    description: Staging view over Bronze orders with standardized payment method and status labels.
     columns:
       - name: order_id
         description: Primary key from Azure SQL.
@@ -34,7 +34,7 @@ models:
                 field: product_id
 
   - name: stg_products
-    description: Thin staging view over Bronze products.
+    description: Staging view over Bronze products with standardized product name, unit, and status.
     columns:
       - name: product_id
         description: Primary key from Azure SQL.
@@ -43,7 +43,7 @@ models:
           - unique
 
   - name: stg_categories
-    description: Thin staging view over Bronze categories.
+    description: Staging view over Bronze categories with standardized category name and status.
     columns:
       - name: category_id
         description: Primary key from Azure SQL.
@@ -52,7 +52,7 @@ models:
           - unique
 
   - name: stg_customers
-    description: Staging view over Bronze customers. CPF, CNPJ and phone expose only their last four digits; email is partially masked. Full name and birth date remain identifiable and require a defined purpose and restricted access.
+    description: Staging view over Bronze customers with standardized attributes and masked direct identifiers. Full name and birth date remain identifiable and require a defined purpose and restricted access.
     columns:
       - name: customer_id
         description: Primary key from Azure SQL.

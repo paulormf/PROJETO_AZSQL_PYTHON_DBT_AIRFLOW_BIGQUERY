@@ -1,0 +1,11 @@
+version: 2
+
+models:
+  - name: int_orders
+    description: Order-grain model that aggregates order items by order and joins the result to the order header.
+    columns:
+      - name: order_id
+        description: One row per order.
+        data_tests:
+          - not_null
+          - unique
