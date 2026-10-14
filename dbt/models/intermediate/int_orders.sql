@@ -1,14 +1,14 @@
 with total_orders_items as (
-    
+
     select 
-    order_id, 
-    sum(total_item) as item_total_amount
-    from {{ ref('stg_order_items') }} 
+        order_id, 
+        sum(total_item) as item_total_amount
+        from {{ ref('stg_order_items') }} 
     group by order_id
+
 )
 
 select 
-
     o.order_id,
     o.customer_id,
     FORMAT_DATETIME('%d/%m/%Y %H:%M:%S', DATETIME(o.order_date, 'America/Sao_Paulo')) AS order_date,
