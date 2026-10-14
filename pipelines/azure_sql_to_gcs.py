@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import tempfile
@@ -177,10 +178,30 @@ def capture_cdc_baselines(
 
 def main() -> None:
     load_dotenv()
+    parser = argparse.ArgumentParser(
+        description="Export configured Azure SQL tables to Parquet in GCS."
+    )
+    parser.add_argument(
+        "--strategy",
+        choices=("all", "full_refresh"),
+        default="all",
+        help=(
+            "all creates the initial full baseline; full_refresh exports only tables "
+            "whose configured incremental_strategy is full_refresh"
+        ),
+    )
+    args = parser.parse_args()
+
     config_path = Path(os.getenv("EXPORT_CONFIG_PATH", "config/gcs_exports.yaml"))
     exports = load_enabled_exports(config_path)
+    if args.strategy == "full_refresh":
+        exports = [
+            export
+            for export in exports
+            if export.get("incremental_strategy", "full_refresh") == "full_refresh"
+        ]
     if not exports:
-        print("Nenhuma tabela habilitada para exportação.")
+        print(f"Nenhuma tabela habilitada para a estratégia {args.strategy}.")
         return
 
     bucket_name = required_setting("GCS_BUCKET")
@@ -276,6 +297,7 @@ def main() -> None:
         run_manifest = {
             "manifest_version": 2,
             "status": "SUCCEEDED",
+            "mode": "full_baseline" if args.strategy == "all" else "full_refresh",
             "run_id": run_id,
             "snapshot_isolation": "SNAPSHOT",
             "cdc_baselines": cdc_baselines,

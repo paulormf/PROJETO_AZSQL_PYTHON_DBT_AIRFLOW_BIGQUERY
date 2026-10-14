@@ -303,14 +303,31 @@ def main() -> None:
         action="store_true",
         help="Reset existing CDC checkpoints to this full snapshot for an intentional rebaseline",
     )
+    parser.add_argument(
+        "--strategy",
+        choices=("all", "full_refresh"),
+        default="all",
+        help=(
+            "all loads an initial full baseline; full_refresh loads only tables "
+            "whose configured incremental_strategy is full_refresh"
+        ),
+    )
     args = parser.parse_args()
     if not RUN_ID_PATTERN.fullmatch(args.run_id):
         raise ValueError("Invalid run ID format")
+    if args.reset_cdc_checkpoints and args.strategy != "all":
+        raise ValueError("--reset-cdc-checkpoints is only valid with --strategy all")
 
     config_path = Path(os.getenv("EXPORT_CONFIG_PATH", "config/gcs_exports.yaml"))
     exports = load_enabled_exports(config_path)
+    if args.strategy == "full_refresh":
+        exports = [
+            export
+            for export in exports
+            if export.get("incremental_strategy", "full_refresh") == "full_refresh"
+        ]
     if not exports:
-        print("Nenhuma tabela habilitada para carga no BigQuery.")
+        print(f"Nenhuma tabela habilitada para a estratégia {args.strategy}.")
         return
 
     project_id = required_setting("GCP_PROJECT_ID")
@@ -371,9 +388,12 @@ def main() -> None:
             if export.get("incremental_strategy") == "cdc"
         }
         cdc_baselines = run_manifest.get("cdc_baselines", {})
+        expected_mode = "full_baseline" if args.strategy == "all" else "full_refresh"
+        manifest_mode = run_manifest.get("mode", "full_baseline")
         if (
             run_manifest.get("manifest_version") != 2
             or run_manifest.get("status") != "SUCCEEDED"
+            or manifest_mode != expected_mode
             or run_manifest.get("run_id") != args.run_id
             or set(run_manifest.get("table_names", [])) != configured_names
             or run_manifest.get("snapshot_isolation") != "SNAPSHOT"
@@ -385,7 +405,7 @@ def main() -> None:
             validate_cdc_baseline(baseline, table_name)
         if cdc_export_names and not run_manifest.get("cdc_baseline_captured_at"):
             raise ValueError("Manifesto geral sem horário de captura do baseline CDC")
-        if cdc_export_names:
+        if cdc_export_names and args.strategy == "all":
             validate_baseline_checkpoint_state(
                 bigquery_client,
                 bronze_dataset_id,
@@ -527,7 +547,7 @@ def main() -> None:
                 f"staging {staging_table_id}."
             )
 
-        if cdc_export_names:
+        if cdc_export_names and args.strategy == "all":
             initialize_cdc_checkpoints(
                 bigquery_client,
                 bronze_dataset_id,
@@ -544,6 +564,7 @@ def main() -> None:
             {
                 "manifest_version": 2,
                 "status": "SUCCEEDED",
+                "mode": expected_mode,
                 "run_id": args.run_id,
                 "bronze_dataset": bronze_dataset_id,
                 "staging_dataset": staging_dataset_id,

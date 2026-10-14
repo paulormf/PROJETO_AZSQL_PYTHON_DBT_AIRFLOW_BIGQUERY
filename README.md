@@ -85,6 +85,18 @@ python -m pipelines.gcs_parquet_to_bigquery --run-id 20261009T172516Z-aeb16ae6
 
 O dataset Bronze recebe o snapshot full promovido. O dataset staging contém tabelas temporárias separadas por execução; não use um wildcard que cubra todos os `run_id`. O código valida a localização dos dois datasets e do bucket antes dos jobs.
 
+### Atualizar somente tabelas `full_refresh`
+
+Depois do baseline inicial, não execute o full geral como rotina: ele também contém as tabelas CDC e estabelece um novo baseline. Para atualizar somente as tabelas marcadas como `full_refresh` no YAML, use a mesma implementação com a estratégia seletiva. Isso mantém as tabelas CDC e seus checkpoints intactos:
+
+```powershell
+python -m pipelines.azure_sql_to_gcs --strategy full_refresh
+$runId = Read-Host "RUN_ID impresso pela extração"
+python -m pipelines.gcs_parquet_to_bigquery --strategy full_refresh --run-id $runId
+```
+
+O extrator e o carregador validam que o manifesto pertence ao modo `full_refresh`; o carregador não inicializa nem altera `_cdc_checkpoints` nesse modo. O `RUN_ID` continua representando uma execução seletiva, com manifesto e reconciliação próprios. Não use `--reset-cdc-checkpoints` nessa atualização.
+
 ## Transformar Bronze em Silver com dbt
 
 O projeto dbt fica em `dbt/`, separado das dependências de ingestão. Ele declara
