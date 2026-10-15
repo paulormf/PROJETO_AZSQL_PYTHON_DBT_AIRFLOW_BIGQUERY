@@ -1,0 +1,15 @@
+.git
+.venv
+.venv-dbt
+**/.venv
+**/.venv-dbt
+**/__pycache__
+**/*.py[cod]
+.env
+.env.*
+airflow/.env
+airflow/logs
+airflow/config
+dbt/target
+dbt/logs
+dbt/dbt_packages

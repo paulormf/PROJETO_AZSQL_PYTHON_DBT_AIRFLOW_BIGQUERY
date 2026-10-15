@@ -100,12 +100,10 @@ O extrator e o carregador validam que o manifesto pertence ao modo `full_refresh
 ## Transformar Bronze em Silver com dbt
 
 O projeto dbt fica em `dbt/`, separado das dependências de ingestão. Ele declara
-as tabelas Bronze como `sources`, cria views de staging em
-`PROJECT_1_DEV_SILVER` durante o desenvolvimento e testa chaves primárias e
-relacionamentos entre itens, pedidos e produtos. As
-tabelas de clientes, contatos, endereços e funcionários ficam declaradas como
-sources, mas não são copiadas para Silver nesta primeira etapa; avalie finalidade,
-minimização e acesso antes de modelar dados potencialmente pessoais.
+Bronze como `sources`, cria staging/intermediate em `PROJECT_1_DEV_SILVER` e
+fatos/dimensões em `PROJECT_1_DEV_GOLD`. A staging de clientes mascara alguns
+identificadores; a Bronze continua contendo os valores de origem, então limite
+seu acesso e não use dados pessoais reais sem finalidade e autorização definidas.
 
 O adaptador BigQuery do dbt v1 ainda não oferece suporte ao Python 3.14. Use um
 ambiente separado com Python 3.13 para não alterar o ambiente que executa os
@@ -142,9 +140,11 @@ dbt build --project-dir dbt --profiles-dir dbt
 `dbt build` compila e executa os modelos e os testes declarados. As fontes usam
 `source()` e os modelos downstream usam `ref()`, permitindo ao dbt organizar a
 linhagem e a ordem de execução. Os modelos staging/intermediate ficam em
-`PROJECT_1_DEV_SILVER` e os marts em `PROJECT_1_DEV_GOLD` durante o desenvolvimento;
-as transformações de negócio e modelos de fatos/dimensões serão uma próxima
-etapa após inspecionarmos as colunas e regras das tabelas.
+`PROJECT_1_DEV_SILVER` e os marts em `PROJECT_1_DEV_GOLD` durante o desenvolvimento.
+
+## Orquestração local com Airflow
+
+O ambiente local com Docker Compose e os DAGs para CDC e atualização full seletiva estão em `airflow/`. Consulte [airflow/README.md](airflow/README.md) para configurar credenciais locais, iniciar o Airflow e entender os horários. O Compose é para aprendizado; em produção, use um serviço gerenciado ou uma instalação operacionalmente mantida.
 
 ### Verificar a conexão com Azure SQL
 
