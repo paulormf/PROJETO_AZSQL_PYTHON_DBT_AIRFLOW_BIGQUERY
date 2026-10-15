@@ -3,6 +3,10 @@
 Projeto de treinamento para extrair dados do Azure SQL e, nas próximas etapas,
 carregá-los e transformá-los com BigQuery, dbt e Airflow.
 
+## Arquitetura do projeto
+
+![Diagrama do fluxo de dados do Azure SQL ao BigQuery, com Airflow, Python, GCS, dbt e GitHub Actions](docs/architecture.svg)
+
 ## Conexão local com Azure SQL
 
 ### Pré-requisitos

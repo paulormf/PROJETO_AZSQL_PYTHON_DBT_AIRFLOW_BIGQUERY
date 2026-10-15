@@ -1,0 +1,144 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="850" viewBox="0 0 1600 850" role="img" aria-labelledby="title description">
+  <title id="title">Arquitetura do pipeline de dados</title>
+  <desc id="description">Fluxo do Azure SQL pelo Python e Google Cloud Storage até BigQuery, dbt, com Airflow para orquestração e GitHub Actions para CI.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1220"/>
+      <stop offset="1" stop-color="#111c30"/>
+    </linearGradient>
+    <linearGradient id="airflow" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#102d42"/>
+      <stop offset="1" stop-color="#123b4c"/>
+    </linearGradient>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8ba4c7"/>
+    </marker>
+    <marker id="arrow-cyan" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5 L0,10 z" fill="#4dd4e8"/>
+    </marker>
+    <style>
+      text { font-family: Inter, Segoe UI, Arial, sans-serif; fill: #edf4ff; }
+      .title { font-size: 32px; font-weight: 700; letter-spacing: .2px; }
+      .subtitle { font-size: 16px; fill: #9eb1ca; }
+      .node-title { font-size: 19px; font-weight: 700; }
+      .node-copy { font-size: 14px; fill: #bdcbe0; }
+      .tag { font-size: 12px; font-weight: 700; letter-spacing: .7px; }
+      .flow-label { font-size: 12px; fill: #a9bbd3; }
+      .small { font-size: 13px; fill: #c3d0e1; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="850" rx="24" fill="url(#background)"/>
+  <circle cx="1490" cy="70" r="170" fill="#213e67" opacity=".16"/>
+  <circle cx="80" cy="790" r="190" fill="#14616c" opacity=".10"/>
+
+  <text x="64" y="70" class="title">Plataforma de dados | Azure SQL → BigQuery</text>
+  <text x="66" y="101" class="subtitle">Ingestão full e incremental com CDC, transformação analítica e orquestração</text>
+
+  <!-- Orquestração Airflow -->
+  <rect x="255" y="137" width="1088" height="112" rx="18" fill="url(#airflow)" stroke="#28728a" stroke-width="1.5"/>
+  <rect x="278" y="157" width="92" height="25" rx="12" fill="#164b5c"/>
+  <text x="294" y="174" class="tag" fill="#66e2ef">ORQUESTRAÇÃO</text>
+  <text x="278" y="211" class="node-title">Apache Airflow</text>
+  <text x="468" y="178" class="node-copy">Docker Compose local</text>
+  <text x="468" y="205" class="node-copy">DAG CDC diária • DAG full_refresh semanal</text>
+  <text x="905" y="178" class="node-copy">Extrair → carregar → dbt</text>
+  <text x="905" y="205" class="node-copy">Dependências, tentativas e logs das tarefas</text>
+
+  <!-- Fluxo principal -->
+  <g fill="none" stroke="#8ba4c7" stroke-width="2.5" marker-end="url(#arrow)">
+    <path d="M235 448 H275"/>
+    <path d="M475 448 H515"/>
+    <path d="M715 448 H755"/>
+    <path d="M955 448 H995"/>
+    <path d="M1195 448 H1235"/>
+  </g>
+  <g fill="none" stroke="#4dd4e8" stroke-width="2" stroke-dasharray="6 7" marker-end="url(#arrow-cyan)" opacity=".85">
+    <path d="M370 249 V320 H375 V348"/>
+    <path d="M1090 249 V320 H1095 V348"/>
+    <path d="M1290 249 V299 H1435 V348"/>
+  </g>
+  <text x="242" y="425" class="flow-label">origem</text>
+  <text x="476" y="425" class="flow-label">extração</text>
+  <text x="716" y="425" class="flow-label">arquivos</text>
+  <text x="956" y="425" class="flow-label">carga validada</text>
+  <text x="1196" y="425" class="flow-label">transformação</text>
+
+  <!-- Azure SQL -->
+  <rect x="35" y="348" width="200" height="200" rx="18" fill="#15253b" stroke="#438bd1" stroke-width="1.5"/>
+  <rect x="55" y="369" width="92" height="25" rx="12" fill="#183b61"/>
+  <text x="72" y="386" class="tag" fill="#8bc5ff">FONTE</text>
+  <text x="55" y="431" class="node-title">Azure SQL</text>
+  <text x="55" y="463" class="node-copy">CDC: orders, order_items,</text>
+  <text x="55" y="484" class="node-copy">products</text>
+  <text x="55" y="515" class="node-copy">Demais tabelas: full_refresh</text>
+
+  <!-- Extração Python -->
+  <rect x="275" y="348" width="200" height="200" rx="18" fill="#18283a" stroke="#d5a84e" stroke-width="1.5"/>
+  <rect x="295" y="369" width="98" height="25" rx="12" fill="#44371f"/>
+  <text x="312" y="386" class="tag" fill="#f1c76d">INGESTÃO</text>
+  <text x="295" y="431" class="node-title">Python</text>
+  <text x="295" y="463" class="node-copy">Snapshot full e CDC</text>
+  <text x="295" y="484" class="node-copy">Extração em blocos</text>
+  <text x="295" y="515" class="node-copy">Schema + manifesto</text>
+
+  <!-- GCS -->
+  <rect x="515" y="348" width="200" height="200" rx="18" fill="#172b3b" stroke="#54b887" stroke-width="1.5"/>
+  <rect x="535" y="369" width="85" height="25" rx="12" fill="#1d4639"/>
+  <text x="552" y="386" class="tag" fill="#83e0ad">DATA LAKE</text>
+  <text x="535" y="431" class="node-title">Google Cloud</text>
+  <text x="535" y="455" class="node-title">Storage</text>
+  <text x="535" y="489" class="node-copy">Parquet particionado</text>
+  <text x="535" y="515" class="node-copy">Manifestos e marcadores</text>
+
+  <!-- Carga BigQuery -->
+  <rect x="755" y="348" width="200" height="200" rx="18" fill="#172b3b" stroke="#54b887" stroke-width="1.5"/>
+  <rect x="775" y="369" width="98" height="25" rx="12" fill="#1d4639"/>
+  <text x="792" y="386" class="tag" fill="#83e0ad">CARREGAMENTO</text>
+  <text x="775" y="431" class="node-title">Python +</text>
+  <text x="775" y="455" class="node-title">BigQuery Load Jobs</text>
+  <text x="775" y="489" class="node-copy">Reconciliação de linhas</text>
+  <text x="775" y="515" class="node-copy">Staging temporário</text>
+
+  <!-- Bronze -->
+  <rect x="995" y="348" width="200" height="200" rx="18" fill="#342a25" stroke="#d88855" stroke-width="1.5"/>
+  <rect x="1015" y="369" width="67" height="25" rx="12" fill="#593723"/>
+  <text x="1032" y="386" class="tag" fill="#ffb783">BRONZE</text>
+  <text x="1015" y="431" class="node-title">BigQuery</text>
+  <text x="1015" y="463" class="node-copy">PROJECT_1_BRONZE</text>
+  <text x="1015" y="489" class="node-copy">Dados de origem</text>
+  <text x="1015" y="515" class="node-copy">com schema validado</text>
+
+  <!-- dbt Silver -->
+  <rect x="1235" y="348" width="160" height="200" rx="18" fill="#202b42" stroke="#8f9fe0" stroke-width="1.5"/>
+  <rect x="1255" y="369" width="59" height="25" rx="12" fill="#343d68"/>
+  <text x="1272" y="386" class="tag" fill="#c0c9ff">DBT</text>
+  <text x="1255" y="431" class="node-title">Silver</text>
+  <text x="1255" y="463" class="node-copy">Staging</text>
+  <text x="1255" y="484" class="node-copy">Intermediate</text>
+  <text x="1255" y="515" class="node-copy">Limpeza e regras</text>
+
+  <!-- Gold -->
+  <rect x="1435" y="348" width="140" height="200" rx="18" fill="#342e20" stroke="#d4b34e" stroke-width="1.5"/>
+  <rect x="1455" y="369" width="58" height="25" rx="12" fill="#51431e"/>
+  <text x="1472" y="386" class="tag" fill="#f5d56c">GOLD</text>
+  <text x="1455" y="431" class="node-title">dbt Marts</text>
+  <text x="1455" y="463" class="node-copy">Fatos</text>
+  <text x="1455" y="484" class="node-copy">Dimensões</text>
+  <text x="1455" y="515" class="node-copy">Consumo analítico</text>
+
+  <!-- CI separado do fluxo de dados -->
+  <rect x="255" y="625" width="1088" height="132" rx="18" fill="#171f31" stroke="#596d91" stroke-width="1.5" stroke-dasharray="8 6"/>
+  <rect x="278" y="646" width="130" height="25" rx="12" fill="#292f48"/>
+  <text x="295" y="663" class="tag" fill="#c3b5ff">INTEGRAÇÃO CONTÍNUA</text>
+  <text x="278" y="710" class="node-title">GitHub Actions</text>
+  <text x="468" y="684" class="node-copy">Valida o repositório a cada alteração</text>
+  <text x="468" y="714" class="node-copy">Build da imagem • compilação Python • testes • DAGs • dbt parse</text>
+  <text x="468" y="739" class="small">A CI verifica o código; a execução dos pipelines é orquestrada pelo Airflow.</text>
+
+  <text x="64" y="805" class="small">Fluxo de dados</text>
+  <path d="M166 800 H216" stroke="#8ba4c7" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <text x="235" y="805" class="small">Orquestração (tracejado azul)</text>
+  <path d="M443 800 H493" stroke="#4dd4e8" stroke-width="2" stroke-dasharray="6 7" marker-end="url(#arrow-cyan)"/>
+  <text x="516" y="805" class="small">CI do repositório, sem acesso aos dados de produção</text>
+</svg>
