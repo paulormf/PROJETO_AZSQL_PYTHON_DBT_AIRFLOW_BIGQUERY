@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate project
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build Airflow image
+        run: docker build --pull --tag azsql-data-platform-airflow-ci --file airflow/Dockerfile .
+
+      - name: Compile Python files
+        run: >-
+          docker run --rm --entrypoint /bin/bash azsql-data-platform-airflow-ci -lc
+          'cd /opt/airflow/project && /opt/airflow/venvs/ingestion/bin/python -m compileall -q pipelines src scripts airflow/dags'
+
+      - name: Run unit tests
+        run: >-
+          docker run --rm --entrypoint /bin/bash azsql-data-platform-airflow-ci -lc
+          '/opt/airflow/venvs/ingestion/bin/python -m unittest discover -s /opt/airflow/project/tests -v'
+
+      - name: Load Airflow DAGs
+        run: >-
+          docker run --rm --entrypoint /bin/bash azsql-data-platform-airflow-ci -lc
+          '/usr/local/bin/python /opt/airflow/project/airflow/dags/project_workflows.py'
+
+      - name: Parse dbt project
+        env:
+          GCP_PROJECT_ID: ci-project
+          DBT_DEFAULT_DATASET: CI_DATASET
+          BQ_LOCATION: us-central1
+        run: >-
+          docker run --rm
+          --env GCP_PROJECT_ID
+          --env DBT_DEFAULT_DATASET
+          --env BQ_LOCATION
+          --entrypoint /bin/bash azsql-data-platform-airflow-ci -lc
+          '/opt/airflow/venvs/dbt/bin/dbt parse --no-partial-parse --project-dir /opt/airflow/project/dbt --profiles-dir /opt/airflow/project/dbt'

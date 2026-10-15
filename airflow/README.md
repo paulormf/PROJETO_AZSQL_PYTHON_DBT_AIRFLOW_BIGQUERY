@@ -23,6 +23,18 @@ docker compose --env-file airflow/.env -f airflow/docker-compose.yml up -d
 
 Abra `http://localhost:8080`. O usuário local é `admin`; a senha aleatória gerada fica no arquivo local `airflow/config/simple_auth_manager_passwords.json`. Consulte esse arquivo para entrar. Ele fica fora do Git.
 
+## CI no GitHub Actions
+
+O workflow `.github/workflows/ci.yml` roda em cada `push` e pull request. Ele
+constroi a imagem Docker do Airflow, compila os arquivos Python, executa os
+testes unitarios existentes, carrega as DAGs e valida o projeto dbt com
+`dbt parse`. Essas etapas nao acessam Azure SQL, GCS ou BigQuery e nao precisam
+de credenciais do ambiente.
+
+O workflow valida o codigo, mas nao publica a imagem, implanta DAGs nem dispara
+cargas de dados. Para bloquear merges quando a validacao falhar, configure a
+protecao da branch principal no GitHub e exija o status `Validate project`.
+
 ## Fluxos
 
 - `azure_sql_cdc_to_bigquery_dbt`: diariamente às 03:00 em `America/Sao_Paulo`, extrai CDC, aplica o lote no Bronze e executa `dbt build`.
