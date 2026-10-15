@@ -1,4 +1,4 @@
-# Control the export allowlist here. Disabled tables are skipped.
+# Controle aqui a lista de tabelas permitidas para exportação. Tabelas desabilitadas são ignoradas.
 exports:
   - name: order_items
     enabled: true
@@ -8,8 +8,8 @@ exports:
     incremental_strategy: cdc
     primary_key:
       - order_item_id
-    # This portfolio currently exports all source columns. Revisit data minimization
-    # before using the same pattern with personal or production data.
+    # Este portfólio exporta atualmente todas as colunas da origem. Reavalie a minimização de dados
+    # antes de usar o mesmo padrão com dados pessoais ou de produção.
     columns: "*"
     chunk_rows: 5000
 
@@ -80,11 +80,11 @@ exports:
     columns: "*"
     chunk_rows: 5000
 
-  # Copy this entry for another table and set enabled: true when ready.
-  # - name: another_table
+  # Copie este bloco para adicionar outra tabela e defina enabled: true quando estiver pronta.
+  # - name: outra_tabela
   #   enabled: false
   #   schema: dbo
-  #   table: another_table
+  #   table: outra_tabela
   #   load_mode: full
   #   incremental_strategy: full_refresh
   #   columns:

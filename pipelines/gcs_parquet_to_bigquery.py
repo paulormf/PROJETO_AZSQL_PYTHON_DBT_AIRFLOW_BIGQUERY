@@ -487,7 +487,7 @@ def main() -> None:
                 }
             )
 
-        # Do not touch any Bronze table until every source table is staged and validated.
+        # Não altere nenhuma tabela Bronze até que todas as tabelas de origem estejam preparadas e validadas.
         promoted_tables = []
         for result in run_table_results:
             staging_table_id = result["staging_table_id"]

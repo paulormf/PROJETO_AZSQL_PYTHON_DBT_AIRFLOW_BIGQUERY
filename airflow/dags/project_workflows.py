@@ -27,8 +27,8 @@ def project_environment() -> dict[str, str]:
         if key and value is not None
     }
     environment = {**os.environ, **local_values}
-    # Google client libraries look for GOOGLE_CLOUD_PROJECT. The project config
-    # uses the provider-neutral GCP_PROJECT_ID name, so bridge it for containers.
+    # As bibliotecas clientes do Google procuram GOOGLE_CLOUD_PROJECT. A configuração do projeto
+    # usa o nome genérico GCP_PROJECT_ID; por isso, mapeamos a variável para os contêineres.
     if not environment.get("GOOGLE_CLOUD_PROJECT") and environment.get("GCP_PROJECT_ID"):
         environment["GOOGLE_CLOUD_PROJECT"] = environment["GCP_PROJECT_ID"]
     return environment

@@ -626,7 +626,7 @@ def main() -> None:
                 }
             )
 
-        # A run success marker is written only after every table checkpoint commits.
+        # O marcador de sucesso da execução só é gravado após confirmar o checkpoint de cada tabela.
         for result in batch_results:
             manifest = result["manifest"]
             write_json_marker(

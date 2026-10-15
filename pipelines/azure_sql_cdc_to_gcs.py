@@ -379,7 +379,7 @@ def main() -> None:
                         }
                     )
 
-        # Publish success markers only after every configured table is extracted.
+        # Publique os marcadores de sucesso somente após extrair todas as tabelas configuradas.
         for result in table_results:
             export = result["export"]
             object_prefix = result.get("object_prefix") or (

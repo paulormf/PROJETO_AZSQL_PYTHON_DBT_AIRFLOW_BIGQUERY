@@ -1,3 +1,3 @@
-# dbt v1 BigQuery adapter currently supports Python through 3.13.
-# Install this in a separate Python 3.13 environment from the ingestion pipelines.
+# O adaptador BigQuery do dbt v1 atualmente oferece suporte ao Python até a versão 3.13.
+# Instale estas dependências em um ambiente Python 3.13 separado dos pipelines de ingestão.
 dbt-bigquery==1.12.1

@@ -218,11 +218,11 @@ def main() -> None:
 
     try:
         bucket = storage_client.bucket(bucket_name)
-        # The watermark must precede the SNAPSHOT. Changes after this point can
-        # be replayed over the full baseline; taking it later could skip changes.
+        # O watermark deve ser obtido antes do SNAPSHOT. As alterações posteriores
+        # a esse ponto podem ser reaplicadas sobre a carga completa; obtê-lo depois poderia perder alterações.
         cdc_baselines = capture_cdc_baselines(engine, exports)
         cdc_baseline_captured_at = datetime.now(timezone.utc).isoformat()
-        # One transaction gives every table and its count the same database view.
+        # Uma única transação garante que todas as tabelas e suas contagens usem a mesma visão do banco.
         with engine.connect() as connection:
             connection = connection.execution_options(isolation_level="SNAPSHOT")
             with connection.begin():
@@ -259,7 +259,7 @@ def main() -> None:
                         {"export": export, "object_prefix": object_prefix, **result}
                     )
 
-        # Markers appear only after the whole database snapshot transaction commits.
+        # Os marcadores só são criados após a confirmação da transação completa do snapshot do banco.
         for result in table_results:
             export = result["export"]
             manifest = {

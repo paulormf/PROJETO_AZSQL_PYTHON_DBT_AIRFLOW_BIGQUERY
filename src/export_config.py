@@ -101,7 +101,7 @@ def load_enabled_exports(config_path: Path) -> list[dict[str, Any]]:
             raise ValueError(f"Duplicate export name in configuration: {name}")
         seen_names.add(name)
 
-        # Validate SQL identifiers and columns before opening cloud or SQL connections.
+        # Valide os identificadores SQL e as colunas antes de abrir conexões com a nuvem ou o SQL.
         quote_identifier(export["schema"])
         quote_identifier(export["table"])
         build_select_query(export)

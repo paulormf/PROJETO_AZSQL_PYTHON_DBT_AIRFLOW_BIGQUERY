@@ -1,9 +1,9 @@
 /*
-Enable table-level CDC for the project's CDC incremental subset.
+Habilita o CDC no nível de tabela para o subconjunto incremental do projeto.
 
-Review and keep this list aligned with incremental_strategy: cdc in config/gcs_exports.yaml.
-Run manually against the source database with an authorized database owner account.
-This script is idempotent: already tracked tables are skipped.
+Revise e mantenha esta lista alinhada com incremental_strategy: cdc em config/gcs_exports.yaml.
+Execute manualmente no banco de origem com uma conta autorizada de proprietária do banco.
+Este script é idempotente: tabelas que já estão sendo rastreadas são ignoradas.
 */
 
 IF NOT EXISTS (
